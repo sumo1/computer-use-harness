@@ -1,0 +1,25 @@
+node_modules/
+dist/
+*.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Agent runtime
+.computer-use/
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Native build output
+native/mac-helper/.build/

@@ -1,0 +1,136 @@
+- id: UC-001
+  title: Diagnose local permissions
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+      - screen-recording
+  steps:
+    - check permission status
+    - return missing permission hints
+  success:
+    - result includes permission status
+    - missing permissions are explicit
+
+- id: UC-010
+  title: List apps and capabilities
+  requires:
+    platform: macos
+  steps:
+    - list running apps
+    - load app capability registry
+    - return support level per app
+  success:
+    - result includes app names
+    - result includes support level
+
+- id: UC-020
+  title: Open app and read window state
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open app
+    - list windows
+    - read app state
+  success:
+    - target app is found
+    - at least one window or clear empty-window reason is returned
+
+- id: UC-030
+  title: Click a visible button in a local app
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open app
+    - read app state
+    - find button by role and name
+    - click button
+    - read app state again
+  success:
+    - action result is ok
+    - trace contains observation action and result
+    - app state changed or verifier confirms click effect
+
+- id: UC-040
+  title: Type into a visible input field in a local app
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open app
+    - read app state
+    - find input by role
+    - set value or click and type
+    - read app state again
+  success:
+    - action result is ok
+    - input text is visible or verifier confirms value
+
+- id: UC-050
+  title: Use browser-harness for browser interaction
+  requires:
+    platform: any
+    services:
+      - browser-harness
+  steps:
+    - connect to browser-harness
+    - read browser state
+    - click browser element
+  success:
+    - browser-harness result is ok
+    - browser trace event is recorded
+
+- id: UC-060
+  title: Block protected targets
+  requires:
+    platform: macos
+  steps:
+    - request action against protected app
+    - evaluate policy
+  success:
+    - action is blocked before execution
+    - policy decision is returned
+
+- id: UC-070
+  title: Record trace for every action
+  requires:
+    platform: any
+  steps:
+    - start run
+    - perform fake observation
+    - perform fake action
+    - record result
+  success:
+    - trace id is returned
+    - trace contains ordered events
+
+- id: UC-080
+  title: Explain missing permissions
+  requires:
+    platform: macos
+  steps:
+    - detect missing permission
+    - return action hint
+  success:
+    - error code is permission related
+    - output includes next action hint
+
+- id: UC-090
+  title: Operate basic IDEA UI
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - resolve IntelliJ IDEA capability
+    - read app state
+    - operate a basic dialog or search field
+  success:
+    - IDEA support level is automation or generic
+    - action uses JetBrains-specific or accessibility fallback
+

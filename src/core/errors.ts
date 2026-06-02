@@ -1,0 +1,32 @@
+export const CommandErrorCode = {
+  APP_CAPABILITY_NOT_FOUND: "APP_CAPABILITY_NOT_FOUND",
+  INVALID_RUN_MODE: "INVALID_RUN_MODE",
+  MISSING_APP_NAME: "MISSING_APP_NAME",
+  MISSING_CASE_ID: "MISSING_CASE_ID",
+  REAL_RUNNER_NOT_IMPLEMENTED: "REAL_RUNNER_NOT_IMPLEMENTED",
+  TRACE_NOT_FOUND: "TRACE_NOT_FOUND",
+  UNEXPECTED_ERROR: "UNEXPECTED_ERROR",
+  UNKNOWN_COMMAND: "UNKNOWN_COMMAND",
+  UNKNOWN_USE_CASE: "UNKNOWN_USE_CASE",
+  UNKNOWN_USECASES_COMMAND: "UNKNOWN_USECASES_COMMAND",
+} as const
+
+export type CommandErrorCode = (typeof CommandErrorCode)[keyof typeof CommandErrorCode]
+
+export const ActionErrorCode = {
+  INVALID_REQUEST: "INVALID_REQUEST",
+  INVALID_TARGET: "INVALID_TARGET",
+  PERMISSION_REQUIRED: "PERMISSION_REQUIRED",
+  POLICY_BLOCKED: "POLICY_BLOCKED",
+  UNIMPLEMENTED: "UNIMPLEMENTED",
+} as const
+
+export type ActionErrorCode = (typeof ActionErrorCode)[keyof typeof ActionErrorCode]
+
+export const ExitCode = {
+  OK: 0,
+  UNEXPECTED_ERROR: 1,
+  USAGE_OR_BUSINESS_ERROR: 2,
+} as const
+
+export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode]
