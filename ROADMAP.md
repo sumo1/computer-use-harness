@@ -1,63 +1,64 @@
-# computer-use-harness Roadmap
+# Roadmap
+
+computer-use-harness 按 use case 推进，不按文件、类名或 adapter 细节推进。
+
+原因很简单：computer-use 的风险不在某个函数，而在整条链路是否可控。
+
+每个阶段都必须回答四个问题：
+
+- 用户场景是什么？
+- 成功信号是什么？
+- 失败信号是什么？
+- 会不会破坏 policy、trace 或 JSON contract？
 
 ## 拆分原则
 
-先做端到端验证层，再向下填实现。
+### 1. 先协议，后能力
 
-任务描述只记录：
+真实点击和输入不是第一步。
 
-- 要支持的用户场景。
-- 关键能力。
-- 成功/失败信号。
-- 不变量。
+第一步是 Target、Observation、Action、ActionResult、PolicyDecision、TraceEvent 这些协议稳定下来。协议不稳，真实动作越早接入，后面越难修。
 
-任务描述不记录：
+### 2. 先 fake，再 native
 
-- 临时函数名。
-- 内部文件路径。
-- 未冻结的数据字段全集。
-- 某一版 adapter 的实现细节。
+fake runner 用来验证 CLI、trace、policy 和 use case harness。
 
-这样底层实现调整时，不需要连带修改所有上层任务。
+native runner 用来验证 Swift helper 的真实 stdio 边界和失败语义。
 
-## 第一层：Use Case List
+真实 UI action 必须排在这两层之后。
 
-第一步不是写 Mac helper，也不是写 adapter，而是先定义端到端 use cases。
+### 3. 先失败语义，后成功路径
 
-目标文件：
+一个可靠的 computer-use runtime，必须先知道怎么失败：
+
+- 权限缺失。
+- target 不合法。
+- action 被 policy 拦截。
+- element ref 过期。
+- adapter 不支持。
+- helper 未实现。
+
+失败码稳定之后，成功路径才值得接。
+
+### 4. Browser 和 native 分开
+
+浏览器走 browser-harness。
+
+本地 App 走 mac helper 或 app-specific adapter。
+
+runtime 统一协议，但 adapter 不互相污染。
+
+## Use Case List
+
+Use case 是项目顶层契约，定义在：
 
 ```text
 usecases/cases.yaml
 ```
 
-每个 case 只描述：
-
-```yaml
-id: UC-030
-title: Click a visible button in a local app
-requires:
-  platform: macos
-  permissions:
-    - accessibility
-steps:
-  - open app
-  - read app state
-  - find button by role/name
-  - click button
-  - read app state again
-success:
-  - action result is ok
-  - trace contains observation/action/result
-  - app state changed or verifier confirms click effect
-```
-
-不要在 use case 里写 Swift 类名、TS 函数名、AX 细节。
-
-## Use Case 初始清单
-
 | ID | 场景 | 核心能力 |
 |---|---|---|
-| UC-001 | 诊断本机权限 | 检查 Accessibility / Screen Recording / helper 状态 |
+| UC-001 | 诊断本机权限 | Accessibility / Screen Recording / helper status |
 | UC-010 | 列出 App 和能力 | app registry / capability visibility |
 | UC-020 | 打开 App 并读取窗口 | open app / list windows / app state |
 | UC-030 | 找按钮并点击 | find element / click / verify |
@@ -68,159 +69,118 @@ success:
 | UC-080 | 权限缺失时可解释失败 | permission error / doctor hint |
 | UC-090 | IDEA 基础 UI 操作 | JetBrains-specific + AX fallback |
 
-这些 use cases 是第一版的顶层契约。下面所有实现任务都只需要引用这些 ID。
+## Milestones
 
-## 任务拆分
+### M1. CLI Harness
 
-### Task 1 - Use Case Harness
+目标：能在没有真实 UI 权限的情况下验证端到端协议。
 
-目标：建立端到端验证模块。
+包含：
 
-能力：
-
-- 读取 `usecases/cases.yaml`。
-- 支持 dry-run，列出每个 case 的前置条件和步骤。
-- 支持 fake adapter，先不依赖真实 macOS UI。
-- 输出统一验证结果。
-
-验收：
-
-- `computer-use usecases list` 能列出初始清单。
-- `computer-use usecases run UC-030 --fake` 能跑通假实现。
-- 输出包含 case id、status、step results、trace id。
-
-### Task 2 - CLI Skeleton
-
-目标：建立最薄 CLI。
-
-能力：
-
-- 参数解析。
+- use case loader。
+- `usecases list`。
+- `usecases dry-run`。
+- `usecases run --fake`。
 - 默认 JSON 输出。
-- `--pretty` 人类可读输出。
 - 稳定 exit code。
-- stdout 只输出结构化结果，包括 `ok: false` 的业务错误。
-- 日志、调试信息和非协议噪声输出到 stderr。
 
-验收：
+状态：Done。
 
-- `computer-use --help`
-- `computer-use version`
-- `computer-use usecases list`
-- CLI 不直接调用 macOS API。
+### M2. Core Runtime
 
-### Task 3 - Core Contracts
+目标：把 computer-use 的核心对象冻结成最小公共协议。
 
-目标：冻结最小公共协议。
+包含：
 
-能力：
+- `Target`
+- `Observation`
+- `ElementRef`
+- `Action`
+- `ActionResult`
+- `TraceEvent`
+- `PolicyDecision`
+- `AppCapability`
 
-- Target
-- Observation
-- ElementRef
-- Action
-- ActionResult
-- TraceEvent
-- AppCapability
+状态：Done。
 
-验收：
+### M3. Trace And Policy
 
-- fake adapter、CLI、usecase runner 都使用同一套 contract。
-- contract 不依赖 Node、macOS、browser-harness。
+目标：每一步都可审查，危险动作先被 runtime 拦住。
 
-### Task 4 - Trace Runtime
+包含：
 
-目标：先把可调试性做出来。
-
-能力：
-
-- 每个 run 有 trace id。
-- 每步记录 observation/action/result。
-- artifact 路径可记录。
-- 支持 `computer-use trace --last`。
-
-验收：
-
-- fake use case 也会产生 trace。
-- 失败 case 能从 trace 定位失败步骤。
-
-### Task 5 - Policy Guard
-
-目标：动作执行前先过 policy。
-
-能力：
-
-- blocked targets。
-- confirm-required actions。
-- allowed app list。
-- denied app list。
-
-验收：
-
-- UC-060 能阻止当前终端、Claude Code/Codex 自身、系统安全弹窗。
+- JSONL trace。
+- `trace --last`。
+- blocked target table。
 - policy decision 写入 trace。
+- UC-060 blocked path。
 
-### Task 6 - App Capability Registry
+状态：Done。
 
-目标：调用前先知道 App 支持什么。
+### M4. Capability Registry
 
-能力：
+目标：调用前先知道 App 支持什么能力。
 
-- `computer-use apps --json`
-- `computer-use capabilities --app <name>`
-- support level: blocked/custom/automation/generic/screen
+包含：
+
+- `apps`
+- `capabilities --app <name>`
+- support level。
 - fallback path。
+- blocked app visibility。
 
-验收：
+状态：Done。
 
-- Safari/browser 使用 browser-harness adapter。
-- IDEA 显示 automation + AX fallback。
-- Terminal 显示 blocked。
+### M5. Mac Helper Protocol
 
-### Task 7 - Mac Helper Protocol
+目标：定义 TS 和 Swift helper 的稳定边界。
 
-目标：定义 TS 和 Swift helper 的边界。
-
-能力：
+包含：
 
 - JSON-RPC over stdio。
-- permissionStatus。
-- listApps。
-- listWindows。
-- getAppState。
-- click/type/key/scroll。
+- `permissionStatus`
+- `listApps`
+- `listWindows`
+- `getAppState`
+- `click/type/key/scroll`
+- TS fake helper client。
+- TS stdio helper client。
 
-验收：
+状态：Done。
 
-- TS 侧能通过 fake helper 跑 UC-020/030/040。
-- helper 协议不暴露 AXUIElement 内部细节。
+### M6. Mac Helper Minimal Implementation
 
-### Task 8 - Mac Helper Minimal Implementation
+目标：接入真实 macOS 查询能力，但不执行真实 UI action。
 
-目标：接入真实 macOS 能力。
+包含：
 
-能力：
+- Swift package。
+- 长连接 JSONL stdio loop。
+- permission status。
+- running apps。
+- windows。
+- app state。
+- action request validation。
+- stable `ActionResult` failure。
+- CLI `--mac-helper <path>` native runner。
+- native action failure 写入 trace。
 
-- Accessibility permission check。
-- Screen Recording permission check。
-- list running apps。
-- list windows。
-- get accessibility tree。
-- action request validation for click/type/key/scroll。
+状态：In progress。
 
-验收：
+剩余：
 
-- UC-001/010/020 在本机真实 Mac 上可运行。
-- 权限缺失时返回可解释错误。
-- action 方法在真实执行前返回稳定 `ActionResult` 失败语义。
-- CLI native runner 可通过 `--mac-helper <path>` 把 helper action failure 写入 trace。
+- 基础 accessibility tree。
+- 更明确的 permission hint。
+- helper smoke scripts。
 
-### Task 9 - Mac Actions
+### M7. Real Mac Actions
 
-目标：让通用 App 可操作。
+目标：让普通本地 App 可以被安全操作。
 
-能力：
+包含：
 
+- element ref lookup。
+- element stale error。
 - click by element ref。
 - type text。
 - set value。
@@ -230,14 +190,19 @@ success:
 
 验收：
 
-- UC-030/040 在至少一个系统 App 上跑通。
-- element ref 过期后能返回明确错误。
+- UC-030 在一个系统 App 上跑通。
+- UC-040 在一个系统 App 上跑通。
+- element ref 过期时返回稳定错误码。
+- 所有真实 action 先经过 policy。
+- 所有真实 action 写 trace。
 
-### Task 10 - Browser Harness Adapter
+状态：Not started。
 
-目标：浏览器能力接本地 browser-harness。
+### M8. Browser Harness Adapter
 
-能力：
+目标：浏览器能力接入统一协议。
+
+包含：
 
 - browser state。
 - browser click。
@@ -248,27 +213,92 @@ success:
 验收：
 
 - UC-050 通过本地 browser-harness 跑通。
-- browser adapter 不直接依赖 Mac helper。
+- browser adapter 不依赖 Mac helper。
 
-### Task 11 - Agent Skills
+状态：Not started。
 
-目标：让 Claude Code / Codex 通过 skill 调 CLI。
+### M9. Agent Skills
 
-能力：
+目标：让 Claude Code / Codex 稳定调用 CLI。
+
+包含：
 
 - Claude Code skill。
 - Codex skill。
-- 说明何时调用。
-- 说明 JSON 输出如何解析。
-- 说明高风险动作确认规则。
+- JSON result reading rules。
+- policy blocked handling rules。
+- trace inspection workflow。
 
-验收：
+状态：Not started。
 
-- Claude Code 能通过 shell 调 `computer-use` 完成 UC-030 或 UC-040。
-- skill 不实现 native 能力，只调用 CLI。
+## Agent Roles
 
-## 当前第一步
+### Human Operator
 
-先实现 Task 1。
+负责授权、调试、验收真实机器行为。
 
-不要先写 Swift helper。没有 use case harness，后面实现会变成“感觉差不多能点了”，这不是工程。
+不变量：
+
+- 真实 action 打开前必须明确知道会影响哪个 App。
+- 不能为了 demo 绕过 policy。
+
+### Coding Agent
+
+负责读 JSON、调 CLI、根据 trace 修代码。
+
+不变量：
+
+- 不解析 stdout 里的自然语言。
+- 不在 policy blocked 后尝试绕过 runtime。
+- 不直接调用 Swift helper 绕过 CLI。
+
+### Computer-Use Runner
+
+负责把 use case step 转成 action，并写 trace。
+
+不变量：
+
+- 每个 action 都有 target。
+- 每个 result 都进入 trace。
+- helper transport error 和 action failure 不能混淆。
+
+### Policy Guard
+
+负责动作前置裁决。
+
+不变量：
+
+- blocked target 永远优先于 adapter。
+- decision 必须可审查。
+- confirm-required 不能静默当 allowed。
+
+### Native Helper
+
+负责 macOS 系统 API。
+
+不变量：
+
+- 只暴露 JSON-RPC 协议。
+- 不泄漏 AXUIElement 内部对象。
+- 权限缺失必须返回稳定错误。
+
+### Browser Adapter
+
+负责把 browser-harness 接进统一 contract。
+
+不变量：
+
+- 不重写浏览器自动化。
+- 不依赖 mac helper。
+- browser trace 和 native trace 使用同一套事件模型。
+
+## Definition Of Done
+
+一个 milestone 完成，不是“代码写了”，而是：
+
+- CLI 可运行。
+- JSON contract 稳定。
+- trace 可读。
+- 失败路径有明确 error code。
+- fake 或 native smoke 至少覆盖一个 use case。
+- README 和 ROADMAP 不说谎。
