@@ -134,3 +134,30 @@
     - IDEA support level is automation or generic
     - action uses JetBrains-specific or accessibility fallback
 
+- id: UC-100
+  title: Search and play Duck in QQ Music
+  target:
+    kind: app
+    id: com.tencent.QQMusicMac
+    name: QQ音乐
+    platform: macos
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open app
+    - read app state
+    - find search input by role or name
+    - type 鸭子 into search input
+    - press key Enter
+    - read search results
+    - find playable result named 鸭子
+    - click playable result
+    - read app state again
+  success:
+    - QQ音乐 is the target app
+    - search query 鸭子 is submitted
+    - a playable result named 鸭子 is selected
+    - playback state changes or verifier confirms playback started
+    - trace contains observation action policy and result

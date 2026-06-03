@@ -20,6 +20,10 @@ export function appendTraceEvent(trace: TraceEvent[], event: Omit<TraceEvent, "i
 }
 
 export function createUseCaseTarget(useCase: UseCase): Target {
+  if (useCase.target) {
+    return useCase.target
+  }
+
   if (useCase.id === "UC-060") {
     return {
       kind: "app",
@@ -49,9 +53,7 @@ export function createUseCaseAction(
     kind: inferActionKind(description),
     target,
     adapter,
-    input: {
-      description,
-    },
+    input: createActionInput(description),
   }
 }
 
@@ -63,4 +65,22 @@ function inferActionKind(description: string): ActionKind {
   const normalized = description.toLowerCase()
   const match = ACTION_KIND_PATTERNS.find((entry) => normalized.includes(entry.token))
   return match?.kind ?? "observe"
+}
+
+function createActionInput(description: string): Action["input"] {
+  return {
+    description,
+    ...typeTextInput(description),
+    ...keyInput(description),
+  }
+}
+
+function typeTextInput(description: string): Record<string, string> {
+  const match = description.match(/\btype\s+(.+?)(?:\s+into\b|$)/i)
+  return match?.[1] ? { text: match[1].trim() } : {}
+}
+
+function keyInput(description: string): Record<string, string> {
+  const match = description.match(/\bpress key\s+(.+)$/i)
+  return match?.[1] ? { key: match[1].trim() } : {}
 }

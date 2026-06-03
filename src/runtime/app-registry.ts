@@ -46,6 +46,15 @@ const APP_CAPABILITIES: AppCapability[] = [
     fallback: ["generic", "screen"],
     requiredPermissions: ["accessibility"],
   },
+  {
+    appId: "com.tencent.QQMusicMac",
+    displayName: "QQ音乐",
+    aliases: ["qq music", "qqmusic", "qq音乐", "腾讯音乐"],
+    supportLevel: "generic",
+    adapters: ["mac-helper"],
+    fallback: ["generic", "screen"],
+    requiredPermissions: ["accessibility"],
+  },
 ]
 
 export function listAppCapabilities(): AppCapability[] {

@@ -1,11 +1,19 @@
-import type { TraceEvent } from "../core/contracts.js"
+import type { TargetKind, TraceEvent } from "../core/contracts.js"
 
 export interface UseCase {
   id: string
   title: string
+  target?: UseCaseTarget
   requires?: UseCaseRequirements
   steps: string[]
   success: string[]
+}
+
+export interface UseCaseTarget {
+  kind: TargetKind
+  id?: string
+  name?: string
+  platform?: "any" | "macos"
 }
 
 export interface UseCaseRequirements {
@@ -23,6 +31,7 @@ export interface UseCaseListItem {
 export interface UseCaseDryRunItem {
   id: string
   title: string
+  target?: UseCaseTarget
   requires: UseCaseRequirements
   steps: string[]
   success: string[]

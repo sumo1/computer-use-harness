@@ -14,10 +14,13 @@ export const CommandErrorCode = {
 export type CommandErrorCode = (typeof CommandErrorCode)[keyof typeof CommandErrorCode]
 
 export const ActionErrorCode = {
+  ACTION_FAILED: "ACTION_FAILED",
+  ELEMENT_NOT_FOUND: "ELEMENT_NOT_FOUND",
   INVALID_REQUEST: "INVALID_REQUEST",
   INVALID_TARGET: "INVALID_TARGET",
   PERMISSION_REQUIRED: "PERMISSION_REQUIRED",
   POLICY_BLOCKED: "POLICY_BLOCKED",
+  TARGET_NOT_FOUND: "TARGET_NOT_FOUND",
   UNIMPLEMENTED: "UNIMPLEMENTED",
 } as const
 

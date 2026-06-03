@@ -25,6 +25,7 @@ export interface ElementRef {
   target: Target
   role?: string
   name?: string
+  metadata?: JsonObject
 }
 
 export interface Observation {
