@@ -14,6 +14,7 @@ export type MacHelperMethod =
   | "listApps"
   | "listWindows"
   | "getAppState"
+  | "screenshot"
   | "open"
   | "click"
   | "type"
@@ -82,11 +83,19 @@ export interface MacScrollParams extends MacActionParams {
   amount?: number
 }
 
+export interface MacScreenshot {
+  format: string
+  data: string // base64 encoded
+  width: number
+  height: number
+}
+
 export interface MacHelperClient {
   permissionStatus(): Promise<MacPermissionStatus>
   listApps(): Promise<MacRunningApp[]>
   listWindows(target: Target): Promise<MacWindow[]>
   getAppState(target: Target): Promise<MacAppState>
+  screenshot(target: Target): Promise<MacScreenshot>
   open(params: MacActionParams): Promise<ActionResult>
   click(params: MacActionParams): Promise<ActionResult>
   typeText(params: MacTypeParams): Promise<ActionResult>

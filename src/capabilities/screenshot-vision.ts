@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import type { Action, Observation } from "../core/contracts.js"
+import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
 import type { Capability, CapabilityResult, SemanticHints } from "./capability.js"
 
 /**
@@ -9,11 +10,13 @@ import type { Capability, CapabilityResult, SemanticHints } from "./capability.j
 export class ScreenshotVisionCapability implements Capability {
   readonly name = "screenshot-vision"
   private anthropic: Anthropic
+  private helper?: MacHelperClient
 
-  constructor(apiKey?: string) {
+  constructor(apiKey?: string, helper?: MacHelperClient) {
     this.anthropic = new Anthropic({
       apiKey: apiKey || process.env.ANTHROPIC_API_KEY,
     })
+    this.helper = helper
   }
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
@@ -34,18 +37,25 @@ export class ScreenshotVisionCapability implements Capability {
       }
     }
 
+    console.log('[ScreenshotVision] Executing with helper:', !!this.helper)
+
     try {
-      const result = await this.extractWithVision(observation, query)
+      const result = this.helper
+        ? await this.extractWithScreenshot(action, query)
+        : await this.extractWithAXTree(observation, query)
+
+      console.log('[ScreenshotVision] Extraction result:', result)
 
       return {
         success: true,
         metadata: {
-          source: "claude-vision",
+          source: this.helper ? "claude-vision-screenshot" : "claude-vision-ax",
           query,
           result,
         },
       }
     } catch (error) {
+      console.error('[ScreenshotVision] Error:', error)
       return {
         success: false,
         reason: error instanceof Error ? error.message : String(error),
@@ -53,7 +63,64 @@ export class ScreenshotVisionCapability implements Capability {
     }
   }
 
-  private async extractWithVision(observation: Observation, query: string): Promise<Record<string, unknown>> {
+  private async extractWithScreenshot(action: Action, query: string): Promise<Record<string, unknown>> {
+    if (!this.helper) {
+      throw new Error("Helper client not provided")
+    }
+
+    // Take screenshot
+    const screenshot = await this.helper.screenshot(action.target)
+
+    const prompt = `You are analyzing a QQ Music application window.
+
+Task: ${query}
+
+Look for album information, including album names, release dates, and artist information.
+
+Return ONLY valid JSON (no markdown), for example:
+{"albumName": "最伟大的作品", "releaseYear": "2022", "artist": "周杰伦"}
+
+If no clear album information is found, return: {"status": "no_album_info_found", "reason": "describe what you see"}`
+
+    const response = await this.anthropic.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 2048,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: screenshot.data,
+              },
+            },
+            {
+              type: "text",
+              text: prompt,
+            },
+          ],
+        },
+      ],
+    })
+
+    const textContent = response.content.find((c) => c.type === "text")
+    if (!textContent || textContent.type !== "text") {
+      throw new Error("No text response from Claude")
+    }
+
+    // Parse JSON response
+    const jsonMatch = textContent.text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      throw new Error("No JSON found in response: " + textContent.text.slice(0, 100))
+    }
+
+    return JSON.parse(jsonMatch[0]) as Record<string, unknown>
+  }
+
+  private async extractWithAXTree(observation: Observation, query: string): Promise<Record<string, unknown>> {
     // Prepare context from observation - include more elements
     const elementList = observation.elements
       .filter((el) => {

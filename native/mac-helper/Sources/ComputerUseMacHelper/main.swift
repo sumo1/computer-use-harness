@@ -93,6 +93,8 @@ private func handleRequest(_ request: [String: Any]) -> [String: Any] {
         return response(id: id, result: ["windows": listWindows(params: params)])
     case "getAppState":
         return response(id: id, result: appState(params: params))
+    case "screenshot":
+        return handleScreenshot(id: id, params: params)
     case "open", "click", "type", "key", "scroll":
         return handleAction(id: id, method: method, paramsValue: request["params"])
     default:
@@ -1604,4 +1606,58 @@ private func writeJsonLine(_ value: [String: Any]) {
             FileHandle.standardOutput.write(data)
         }
     }
+}
+
+// MARK: - Screenshot
+
+private func handleScreenshot(id: Any?, params: [String: Any]) -> [String: Any] {
+    guard let targetDict = params["target"] as? [String: Any],
+          let bundleId = targetDict["id"] as? String else {
+        return response(id: id, error: rpcError(code: "INVALID_REQUEST", message: "target.id is required"))
+    }
+    
+    guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
+        return response(id: id, error: rpcError(code: "TARGET_NOT_FOUND", message: "App not running: \(bundleId)"))
+    }
+    
+    // Get all windows for the app
+    let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    
+    let appWindows = windows.filter { window in
+        if let owner = window[kCGWindowOwnerPID as String] as? Int32 {
+            return owner == app.processIdentifier
+        }
+        return false
+    }
+    
+    guard let mainWindow = appWindows.first,
+          let windowNumber = mainWindow[kCGWindowNumber as String] as? CGWindowID else {
+        return response(id: id, error: rpcError(code: "NO_WINDOW", message: "No window found for app"))
+    }
+    
+    // Capture window screenshot
+    guard let cgImage = CGWindowListCreateImage(
+        .null,
+        .optionIncludingWindow,
+        windowNumber,
+        [.boundsIgnoreFraming, .bestResolution]
+    ) else {
+        return response(id: id, error: rpcError(code: "SCREENSHOT_FAILED", message: "Failed to capture window"))
+    }
+    
+    // Convert to PNG data
+    let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+    guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+        return response(id: id, error: rpcError(code: "ENCODE_FAILED", message: "Failed to encode PNG"))
+    }
+    
+    // Convert to base64
+    let base64String = pngData.base64EncodedString()
+    
+    return response(id: id, result: [
+        "format": "png",
+        "data": base64String,
+        "width": cgImage.width,
+        "height": cgImage.height
+    ])
 }

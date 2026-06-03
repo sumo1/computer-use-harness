@@ -38,6 +38,15 @@ export function createFakeMacHelperClient(): MacHelperClient {
       }
     },
 
+    async screenshot() {
+      return {
+        format: "png",
+        data: "",
+        width: 1920,
+        height: 1080,
+      }
+    },
+
     async open(params: MacActionParams) {
       return passedResult(params.action.id)
     },

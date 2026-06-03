@@ -43,7 +43,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
 
   const adapter = getAppAdapter(target.id)
   const apiKey = process.env.ANTHROPIC_API_KEY
-  const capabilityChain = createDefaultCapabilityChain(apiKey)
+  const capabilityChain = createDefaultCapabilityChain(apiKey, helper)
 
   if (adapter?.prepareUseCase) {
     await adapter.prepareUseCase(useCase)
