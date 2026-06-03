@@ -1,22 +1,18 @@
 import { randomUUID } from "node:crypto"
 import type { MacHelperClient, MacPermissionStatus } from "../adapters/mac/helper-protocol.js"
 import { MacHelperProcessClient } from "../adapters/mac/stdio-helper-client.js"
+import "../adapters/apps/index.js"
+import { getAppAdapter } from "../adapters/apps/registry.js"
 import type {
   Action,
   ActionResult,
-  ElementRef,
   Observation,
   PolicyDecision,
   TraceEvent,
 } from "../core/contracts.js"
 import { ActionErrorCode } from "../core/errors.js"
 import { evaluatePolicy } from "../runtime/policy.js"
-import { appendTraceEvent, createUseCaseAction, createUseCaseTarget } from "./action-plan.js"
-import {
-  bindSublimeTextActionInput,
-  prepareSublimeTextUseCase,
-  verifySublimeTextAction,
-} from "./sublime-text.js"
+import { createUseCaseAction, createUseCaseTarget, appendTraceEvent } from "./action-plan.js"
 import type { UseCase, UseCaseRunResult, UseCaseStepResult } from "./types.js"
 
 export interface NativeUseCaseRunnerOptions {
@@ -44,7 +40,10 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   const steps: UseCaseStepResult[] = []
   let currentObservation: Observation | undefined
 
-  await prepareSublimeTextUseCase(useCase)
+  const adapter = getAppAdapter(target.id)
+  if (adapter?.prepareUseCase) {
+    await adapter.prepareUseCase(useCase)
+  }
 
   appendTraceEvent(trace, {
     traceId,
@@ -59,11 +58,17 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
 
   for (const [index, description] of useCase.steps.entries()) {
     const stepIndex = index + 1
-    const plannedAction = bindSublimeTextActionInput(
-      useCase,
-      createUseCaseAction(useCase.id, stepIndex, description, target, "mac-helper"),
-    )
-    const action = bindElement(plannedAction, currentObservation)
+    let plannedAction = createUseCaseAction(useCase.id, stepIndex, description, target, "mac-helper")
+
+    if (adapter?.bindActionInput) {
+      plannedAction = adapter.bindActionInput(useCase, plannedAction)
+    }
+
+    let action = plannedAction
+    if (adapter?.bindElement && currentObservation) {
+      action = adapter.bindElement(action, currentObservation)
+    }
+
     const policy = evaluatePolicy({ target, actionKind: action.kind })
 
     appendTraceEvent(trace, {
@@ -80,7 +85,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
         ? { result: createPolicyBlockedResult(action, policy) }
         : await executeNativeAction(helper, action)
 
-    const result = withPolicy(execution.result, policy)
+    let result = withPolicy(execution.result, policy)
 
     if (policy.status !== "blocked") {
       appendTraceEvent(trace, {
@@ -103,6 +108,14 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
         action,
         observation: execution.observation,
       })
+
+      // App-specific verification
+      if (adapter?.verifyAction) {
+        const verificationResult = await adapter.verifyAction(action, currentObservation)
+        if (verificationResult) {
+          result = verificationResult
+        }
+      }
     }
 
     appendTraceEvent(trace, {
@@ -170,14 +183,6 @@ async function executeNativeAction(
 
   if (action.kind === "observe") {
     const appState = await helper.getAppState(action.target)
-    const verificationResult = await verifyObservation(action, appState.observation)
-
-    if (verificationResult) {
-      return {
-        observation: appState.observation,
-        result: verificationResult,
-      }
-    }
 
     return {
       observation: appState.observation,
@@ -236,247 +241,9 @@ async function executeNativeAction(
   }
 }
 
-function bindElement(action: Action, observation: Observation | undefined): Action {
-  if (!observation) {
-    return action
-  }
-
-  const description = stringInput(action, "description", "").toLowerCase()
-
-  // Sublime Text: type into document (use window as element placeholder)
-  if (action.kind === "type" && isSublimeTextTarget(action.target)) {
-    const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
-    if (docWindow) {
-      return {
-        ...action,
-        element: docWindow,
-        input: {
-          ...(action.input ?? {}),
-          elementBinding: "sublime-text-window",
-        },
-      }
-    }
-    return action
-  }
-
-  if (action.kind !== "click") {
-    return action
-  }
-
-  // Sublime Text: dismiss registration dialog
-  if (description.includes("dismiss registration dialog")) {
-    const cancelButton = findButton(observation.elements, "Cancel")
-    if (cancelButton) {
-      return {
-        ...action,
-        element: cancelButton,
-        input: {
-          ...(action.input ?? {}),
-          elementBinding: "sublime-cancel-button",
-        },
-      }
-    }
-    return action
-  }
-
-  // Sublime Text: focus document window
-  if (description.includes("focus document window")) {
-    const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
-    if (docWindow) {
-      return {
-        ...action,
-        element: docWindow,
-        input: {
-          ...(action.input ?? {}),
-          elementBinding: "sublime-document-window",
-        },
-      }
-    }
-    return action
-  }
-
-  // QQ Music: search all play point
-  const point = qqMusicSearchAllPlayPoint(action, observation)
-  if (point) {
-    return {
-      ...action,
-      input: {
-        ...(action.input ?? {}),
-        ...point,
-        elementBinding: "qqmusic-search-all-play",
-      },
-    }
-  }
-
-  // QQ Music: search input or playable duck
-  const element = findSearchInput(observation.elements) ?? findPlayableDuck(observation.elements)
-
-  if (!element) {
-    return action
-  }
-
-  return {
-    ...action,
-    element,
-    input: {
-      ...(action.input ?? {}),
-      elementBinding: description.includes("search") ? "search-input" : "playable-result",
-    },
-  }
-}
-
-async function verifyObservation(
-  action: Action,
-  observation: Observation,
-): Promise<ActionResult | undefined> {
-  const sublimeVerification = await verifySublimeTextAction(action, observation)
-  if (sublimeVerification) {
-    return sublimeVerification
-  }
-
-  if (!isQQMusicPlaybackVerificationStep(action)) {
-    return undefined
-  }
-
-  const duckSong = observation.elements
-    .map((element) => element.name)
-    .find((name) => normalize(name).includes("歌曲名") && normalize(name).includes("鸭子"))
-  const isPlaying = observation.elements.some((element) => normalize(element.name).includes("暂停"))
-
-  if (duckSong && isPlaying) {
-    return undefined
-  }
-
-  return {
-    actionId: action.id,
-    ok: false,
-    status: "failed",
-    adapter: "mac-helper",
-    observation,
-    metadata: {
-      helperMethod: "getAppState",
-      verifier: "qqmusic-duck-playback",
-    },
-    error: {
-      code: ActionErrorCode.ACTION_FAILED,
-      message: "QQ Music playback verifier did not confirm Duck playback.",
-      details: {
-        song: duckSong ?? "missing",
-        playbackState: isPlaying ? "playing" : "not-playing",
-      },
-    },
-  }
-}
-
-function isQQMusicPlaybackVerificationStep(action: Action): boolean {
-  const description = normalize(stringInput(action, "description", ""))
-  return isQQMusicTarget(action.target) && description.includes("read app state again")
-}
-
-function findSearchInput(elements: ElementRef[]): ElementRef | undefined {
-  const candidates = visibleNonMenuElements(elements)
-  const bySearchName = candidates.find((element) => {
-    const role = normalize(element.role)
-    const name = normalize(element.name)
-    return name.includes("search") || name.includes("搜索") || role.includes("search")
-  })
-
-  return bySearchName ?? candidates.find((element) => isTextInputRole(normalize(element.role)))
-}
-
-function findPlayableDuck(elements: ElementRef[]): ElementRef | undefined {
-  const namedDuck = visibleNonMenuElements(elements).filter((element) =>
-    normalize(element.name).includes("鸭子"),
-  )
-  return (
-    namedDuck.find((element) => isPressableRole(normalize(element.role))) ??
-    namedDuck.find((element) => normalize(element.role) !== "statictext") ??
-    namedDuck[0]
-  )
-}
-
-function qqMusicSearchAllPlayPoint(
-  action: Action,
-  observation: Observation,
-): { x: number; y: number } | undefined {
-  if (!isQQMusicTarget(action.target)) {
-    return undefined
-  }
-
-  const description = normalize(stringInput(action, "description", ""))
-  if (!description.includes("playable") && !description.includes("播放")) {
-    return undefined
-  }
-
-  const panel = visibleNonMenuElements(observation.elements).find((element) => {
-    const roleDescription = normalize(stringMetadata(element, "roleDescription"))
-    return normalize(element.name) === "搜索" && roleDescription.includes("面板")
-  })
-  const frame = panel?.metadata?.frame
-  if (!isRecord(frame) || typeof frame.x !== "number" || typeof frame.y !== "number") {
-    return undefined
-  }
-
-  return {
-    x: frame.x + 41,
-    y: frame.y + 208,
-  }
-}
-
-function visibleNonMenuElements(elements: ElementRef[]): ElementRef[] {
-  return elements.filter((element) => {
-    const role = normalize(element.role)
-    const frame = element.metadata?.frame
-    const width = isRecord(frame) && typeof frame.width === "number" ? frame.width : 0
-    const height = isRecord(frame) && typeof frame.height === "number" ? frame.height : 0
-
-    return !role.includes("menu") && width > 0 && height > 0
-  })
-}
-
-function isSublimeTextTarget(target: Action["target"]): boolean {
-  return normalize(target.id) === "com.sublimetext.4"
-}
-
-function isQQMusicTarget(target: Action["target"]): boolean {
-  return normalize(target.id) === "com.tencent.qqmusicmac"
-}
-
-function isTextInputRole(role: string): boolean {
-  return (
-    role.includes("textfield") ||
-    role.includes("textbox") ||
-    role.includes("textarea") ||
-    role.includes("textview") ||
-    role.includes("searchfield")
-  )
-}
-
-function isPressableRole(role: string): boolean {
-  return (
-    role.includes("button") ||
-    role.includes("row") ||
-    role.includes("cell") ||
-    role.includes("link")
-  )
-}
-
-function normalize(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? ""
-}
-
 function stringInput(action: Action, key: string, fallback: string): string {
   const value = action.input?.[key]
   return typeof value === "string" && value.trim() !== "" ? value : fallback
-}
-
-function stringMetadata(element: ElementRef, key: string): string | undefined {
-  const value = element.metadata?.[key]
-  return typeof value === "string" ? value : undefined
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function withPolicy(result: ActionResult, policy: PolicyDecision): ActionResult {
@@ -492,24 +259,6 @@ function permissionMetadata(permissions: MacPermissionStatus) {
     screenRecording: permissions.screenRecording,
     inputMonitoring: permissions.inputMonitoring,
   }
-}
-
-function findButton(elements: ElementRef[], buttonName: string): ElementRef | undefined {
-  const normalizedName = normalize(buttonName)
-  return visibleNonMenuElements(elements).find((element) => {
-    const role = normalize(element.role)
-    const name = normalize(element.name)
-    return role.includes("button") && name === normalizedName
-  })
-}
-
-function findWindowByTitle(elements: ElementRef[], titlePart: string): ElementRef | undefined {
-  const normalizedTitle = normalize(titlePart)
-  return elements.find((element) => {
-    const role = normalize(element.role)
-    const name = normalize(element.name)
-    return role.includes("window") && name.includes(normalizedTitle)
-  })
 }
 
 function runStatus(steps: UseCaseStepResult[]): UseCaseRunResult["status"] {
