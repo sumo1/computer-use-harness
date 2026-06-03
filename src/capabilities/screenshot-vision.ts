@@ -37,14 +37,10 @@ export class ScreenshotVisionCapability implements Capability {
       }
     }
 
-    console.log('[ScreenshotVision] Executing with helper:', !!this.helper)
-
     try {
       const result = this.helper
         ? await this.extractWithScreenshot(action, query)
         : await this.extractWithAXTree(observation, query)
-
-      console.log('[ScreenshotVision] Extraction result:', result)
 
       return {
         success: true,
@@ -55,7 +51,6 @@ export class ScreenshotVisionCapability implements Capability {
         },
       }
     } catch (error) {
-      console.error('[ScreenshotVision] Error:', error)
       return {
         success: false,
         reason: error instanceof Error ? error.message : String(error),
