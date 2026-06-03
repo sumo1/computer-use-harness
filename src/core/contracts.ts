@@ -6,7 +6,7 @@ export interface JsonObject {
 
 export type TargetKind = "app" | "browser" | "screen"
 export type AdapterKind = "fake" | "browser-harness" | "mac-helper" | "app-specific"
-export type ActionKind = "observe" | "open" | "click" | "type" | "key" | "scroll" | "policy-check"
+export type ActionKind = "observe" | "open" | "click" | "type" | "key" | "scroll" | "policy-check" | "extract"
 export type ActionStatus = "passed" | "failed" | "blocked" | "skipped"
 export type TraceEventKind = "run" | "observation" | "action" | "result" | "policy"
 export type AppSupportLevel = "blocked" | "custom" | "automation" | "generic" | "screen"

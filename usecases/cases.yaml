@@ -185,6 +185,30 @@
     - a result named 周杰伦 is clicked
     - trace contains observation action policy and result
 
+- id: UC-102
+  title: Find Jay Chou latest album in QQ Music
+  target:
+    kind: app
+    id: com.tencent.QQMusicMac
+    name: QQ音乐
+    platform: macos
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open app
+    - read app state
+    - type 周杰伦 into search input
+    - press key Enter
+    - read search results
+    - extract Jay Chou latest album information
+  success:
+    - QQ音乐 is the target app
+    - search query 周杰伦 is submitted
+    - latest album information is extracted
+    - trace contains extracted data
+
 - id: UC-110
   title: Edit and save a file in Sublime Text
   target:

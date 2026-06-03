@@ -2,6 +2,7 @@ import type { Action, ActionKind, Target, TraceEvent } from "../core/contracts.j
 import type { UseCase } from "./types.js"
 
 const ACTION_KIND_PATTERNS: Array<{ token: string; kind: ActionKind }> = [
+  { token: "extract", kind: "extract" },
   { token: "set value", kind: "type" },
   { token: "type", kind: "type" },
   { token: "click", kind: "click" },
@@ -73,6 +74,7 @@ function createActionInput(description: string): Action["input"] {
     ...typeTextInput(description),
     ...keyInput(description),
     ...findResultInput(description),
+    ...extractInput(description),
   }
 }
 
@@ -90,4 +92,13 @@ function findResultInput(description: string): Record<string, string> {
   // Match "click result named X" or "find result named X"
   const match = description.match(/\b(?:click|find) result (?:named |containing )?(.+)$/i)
   return match?.[1] ? { keyword: match[1].trim() } : {}
+}
+
+function extractInput(description: string): Record<string, string> {
+  // Match "extract <something> information"
+  const match = description.match(/\bextract\s+(.+)$/i)
+  if (match?.[1]) {
+    return { query: `Extract ${match[1].trim()}. Return JSON with relevant fields.` }
+  }
+  return {}
 }

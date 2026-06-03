@@ -42,7 +42,8 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   let currentObservation: Observation | undefined
 
   const adapter = getAppAdapter(target.id)
-  const capabilityChain = createDefaultCapabilityChain()
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  const capabilityChain = createDefaultCapabilityChain(apiKey)
 
   if (adapter?.prepareUseCase) {
     await adapter.prepareUseCase(useCase)
@@ -70,8 +71,8 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
 
     let action = plannedAction
 
-    // Use capability chain to bind element/coordinate
-    if (currentObservation && (action.kind === "click" || action.kind === "type")) {
+    // Use capability chain to bind element/coordinate or extract data
+    if (currentObservation && (action.kind === "click" || action.kind === "type" || action.kind === "extract")) {
       const semanticHints = (adapter as any)?.semanticHints
       const { result: capResult, usedCapability } = await capabilityChain.execute(
         action,
@@ -87,6 +88,9 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
             ...action.input,
             ...(capResult.coordinate ? { x: capResult.coordinate.x, y: capResult.coordinate.y } : {}),
             capabilityUsed: usedCapability,
+            ...(action.kind === "extract" && capResult.metadata?.result
+              ? { extractedData: JSON.stringify(capResult.metadata.result) }
+              : {}),
           },
         }
       }
@@ -217,6 +221,24 @@ async function executeNativeAction(
         observation: appState.observation,
         metadata: {
           helperMethod: "getAppState",
+        },
+      },
+    }
+  }
+
+  if (action.kind === "extract") {
+    // Extract action is handled by capability chain
+    // Just return success - the extracted data is in action.input from capability
+    const extractedData = action.input?.extractedData
+    return {
+      result: {
+        actionId: action.id,
+        ok: true,
+        status: "passed",
+        adapter: "mac-helper",
+        metadata: {
+          helperMethod: "extract",
+          ...(extractedData ? { extractedData } : {}),
         },
       },
     }
