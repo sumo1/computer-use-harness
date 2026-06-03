@@ -3,6 +3,7 @@ import type { MacHelperClient, MacPermissionStatus } from "../adapters/mac/helpe
 import { MacHelperProcessClient } from "../adapters/mac/stdio-helper-client.js"
 import "../adapters/apps/index.js"
 import { getAppAdapter } from "../adapters/apps/registry.js"
+import { createDefaultCapabilityChain } from "../capabilities/index.js"
 import type {
   Action,
   ActionResult,
@@ -41,6 +42,8 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   let currentObservation: Observation | undefined
 
   const adapter = getAppAdapter(target.id)
+  const capabilityChain = createDefaultCapabilityChain()
+
   if (adapter?.prepareUseCase) {
     await adapter.prepareUseCase(useCase)
   }
@@ -53,6 +56,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
     metadata: {
       caseId: useCase.id,
       mode: "native",
+      capabilities: capabilityChain.listCapabilities(),
     },
   })
 
@@ -65,8 +69,27 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
     }
 
     let action = plannedAction
-    if (adapter?.bindElement && currentObservation) {
-      action = adapter.bindElement(action, currentObservation)
+
+    // Use capability chain to bind element/coordinate
+    if (currentObservation && (action.kind === "click" || action.kind === "type")) {
+      const semanticHints = (adapter as any)?.semanticHints
+      const { result: capResult, usedCapability } = await capabilityChain.execute(
+        action,
+        currentObservation,
+        semanticHints,
+      )
+
+      if (capResult.success) {
+        action = {
+          ...action,
+          element: capResult.element,
+          input: {
+            ...action.input,
+            ...(capResult.coordinate ? { x: capResult.coordinate.x, y: capResult.coordinate.y } : {}),
+            capabilityUsed: usedCapability,
+          },
+        }
+      }
     }
 
     const policy = evaluatePolicy({ target, actionKind: action.kind })

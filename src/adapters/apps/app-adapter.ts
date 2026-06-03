@@ -1,14 +1,12 @@
 import type { Action, ActionResult, Observation } from "../../core/contracts.js"
+import type { SemanticHints } from "../../capabilities/capability.js"
 import type { UseCase } from "../../usecases/types.js"
 
 /**
- * App-specific adapter interface.
+ * App-specific adapter interface (new capability-based design).
  *
- * Each supported app can provide an adapter to customize:
- * - UseCase preparation (e.g., create temp files)
- * - Action input binding (e.g., inject file paths, button names)
- * - Element binding (e.g., find app-specific UI elements)
- * - Action verification (e.g., check file system, external state)
+ * App adapters now only provide semantic hints, not implementation logic.
+ * The capability chain decides which technique to use based on these hints.
  */
 export interface AppAdapter {
   /**
@@ -22,35 +20,26 @@ export interface AppAdapter {
   readonly appName: string
 
   /**
+   * Semantic hints for finding UI elements.
+   * Maps action descriptions to possible selectors.
+   */
+  readonly semanticHints?: SemanticHints
+
+  /**
    * Prepare the use case before execution.
    * Called once at the start of the use case run.
-   *
-   * Use this to create temp files, set up state, etc.
    */
   prepareUseCase?(useCase: UseCase): Promise<void>
 
   /**
    * Bind action input based on use case context.
-   * Called for each action before element binding.
-   *
-   * Use this to inject file paths, button names, window titles, etc.
+   * Called for each action before capability chain execution.
    */
   bindActionInput?(useCase: UseCase, action: Action): Action
 
   /**
-   * Bind action element from observation.
-   * Called for each action that needs an element (click, type).
-   *
-   * Use this to find app-specific UI elements based on the observation.
-   */
-  bindElement?(action: Action, observation: Observation): Action
-
-  /**
-   * Verify action result.
-   * Called after action execution, before recording the result.
-   *
-   * Use this to verify file system state, external APIs, etc.
-   * Return undefined to skip verification (use default result).
+   * Verify action result (external verification).
+   * Called after action execution.
    */
   verifyAction?(action: Action, observation: Observation): Promise<ActionResult | undefined>
 }

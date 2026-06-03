@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Action, ActionResult, Observation } from "../../../core/contracts.js"
+import type { SemanticHints } from "../../../capabilities/capability.js"
 import { ActionErrorCode } from "../../../core/errors.js"
 import type { UseCase } from "../../../usecases/types.js"
 import type { AppAdapter } from "../app-adapter.js"
@@ -12,9 +13,22 @@ const SUBLIME_TEXT_USE_CASE_ID = "UC-110"
 const SUBLIME_TEXT_SENTINEL = "computer-use-harness: uc-110"
 const SUBLIME_TEXT_SAVE_PATH = join(tmpdir(), "computer-use-harness", "uc-110.txt")
 
+const semanticHints: SemanticHints = {
+  "dismiss registration dialog": {
+    ax: [{ role: "AXButton", name: "Cancel" }],
+  },
+  "focus document window": {
+    ax: [{ role: "AXWindow", name: "uc-110.txt" }],
+  },
+  "type computer-use-harness: uc-110 into document": {
+    ax: [{ role: "AXWindow", name: "uc-110.txt" }],
+  },
+}
+
 export const sublimeTextAdapter: AppAdapter = {
   appId: SUBLIME_TEXT_APP_ID,
   appName: "Sublime Text",
+  semanticHints,
 
   async prepareUseCase(useCase: UseCase): Promise<void> {
     if (useCase.id !== SUBLIME_TEXT_USE_CASE_ID) {
@@ -46,76 +60,10 @@ export const sublimeTextAdapter: AppAdapter = {
       input.expectedText = SUBLIME_TEXT_SENTINEL
     }
 
-    if (description.includes("dismiss registration dialog")) {
-      input.buttonName = "Cancel"
-    }
-
-    if (description.includes("focus document window")) {
-      input.windowTitle = "uc-110.txt"
-    }
-
     return {
       ...action,
       input,
     }
-  },
-
-  bindElement(action: Action, observation: Observation): Action {
-    const description = normalize(action.input?.description)
-
-    // Type into document: use window as element placeholder
-    if (action.kind === "type") {
-      const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
-      if (docWindow) {
-        return {
-          ...action,
-          element: docWindow,
-          input: {
-            ...(action.input ?? {}),
-            elementBinding: "sublime-text-window",
-          },
-        }
-      }
-      return action
-    }
-
-    if (action.kind !== "click") {
-      return action
-    }
-
-    // Dismiss registration dialog
-    if (description.includes("dismiss registration dialog")) {
-      const cancelButton = findButton(observation.elements, "Cancel")
-      if (cancelButton) {
-        return {
-          ...action,
-          element: cancelButton,
-          input: {
-            ...(action.input ?? {}),
-            elementBinding: "sublime-cancel-button",
-          },
-        }
-      }
-      return action
-    }
-
-    // Focus document window
-    if (description.includes("focus document window")) {
-      const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
-      if (docWindow) {
-        return {
-          ...action,
-          element: docWindow,
-          input: {
-            ...(action.input ?? {}),
-            elementBinding: "sublime-document-window",
-          },
-        }
-      }
-      return action
-    }
-
-    return action
   },
 
   async verifyAction(action: Action, observation: Observation): Promise<ActionResult | undefined> {
@@ -188,32 +136,6 @@ function failedFileVerification(
   }
 }
 
-function findButton(elements: Observation["elements"], buttonName: string): Action["element"] {
-  const normalizedName = normalize(buttonName)
-  const visibleElements = elements.filter((el) => {
-    const role = normalize(el.role)
-    const frame = el.metadata?.frame
-    const width = isRecord(frame) && typeof frame.width === "number" ? frame.width : 0
-    const height = isRecord(frame) && typeof frame.height === "number" ? frame.height : 0
-    return !role.includes("menu") && width > 0 && height > 0
-  })
-
-  return visibleElements.find((element) => {
-    const role = normalize(element.role)
-    const name = normalize(element.name)
-    return role.includes("button") && name === normalizedName
-  })
-}
-
-function findWindowByTitle(elements: Observation["elements"], titlePart: string): Action["element"] {
-  const normalizedTitle = normalize(titlePart)
-  return elements.find((element) => {
-    const role = normalize(element.role)
-    const name = normalize(element.name)
-    return role.includes("window") && name.includes(normalizedTitle)
-  })
-}
-
 function stringInput(action: Action, key: string, fallback: string): string {
   const value = action.input?.[key]
   return typeof value === "string" && value.trim() !== "" ? value : fallback
@@ -221,8 +143,4 @@ function stringInput(action: Action, key: string, fallback: string): string {
 
 function normalize(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : ""
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

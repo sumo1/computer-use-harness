@@ -72,6 +72,7 @@ function createActionInput(description: string): Action["input"] {
     description,
     ...typeTextInput(description),
     ...keyInput(description),
+    ...findResultInput(description),
   }
 }
 
@@ -83,4 +84,10 @@ function typeTextInput(description: string): Record<string, string> {
 function keyInput(description: string): Record<string, string> {
   const match = description.match(/\bpress key\s+(.+)$/i)
   return match?.[1] ? { key: match[1].trim() } : {}
+}
+
+function findResultInput(description: string): Record<string, string> {
+  // Match "click result named X" or "find result named X"
+  const match = description.match(/\b(?:click|find) result (?:named |containing )?(.+)$/i)
+  return match?.[1] ? { keyword: match[1].trim() } : {}
 }
