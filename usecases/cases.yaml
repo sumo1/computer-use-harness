@@ -161,3 +161,30 @@
     - a playable result named 鸭子 is selected
     - playback state changes or verifier confirms playback started
     - trace contains observation action policy and result
+
+- id: UC-110
+  title: Edit and save a file in Sublime Text
+  target:
+    kind: app
+    id: com.sublimetext.4
+    name: Sublime Text
+    platform: macos
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  steps:
+    - open temp file in Sublime Text
+    - read app state
+    - dismiss registration dialog if present
+    - focus document window
+    - "type computer-use-harness: uc-110 into document"
+    - press key Command+S
+    - verify saved file content
+  success:
+    - Sublime Text is the target app
+    - temp file is opened in Sublime Text
+    - registration dialog is dismissed if shown
+    - sentinel text is typed into the document
+    - saved file exists on disk with exact sentinel content
+    - trace contains file-system verification evidence

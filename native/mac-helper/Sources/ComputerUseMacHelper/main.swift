@@ -5,6 +5,10 @@ import Foundation
 private let maxAXDepth = 8
 private let maxAXElements = 350
 
+private final class OpenErrorBox: @unchecked Sendable {
+    var error: Error?
+}
+
 runStdioLoop()
 
 private func runStdioLoop() {
@@ -89,7 +93,7 @@ private func handleRequest(_ request: [String: Any]) -> [String: Any] {
         return response(id: id, result: ["windows": listWindows(params: params)])
     case "getAppState":
         return response(id: id, result: appState(params: params))
-    case "click", "type", "key", "scroll":
+    case "open", "click", "type", "key", "scroll":
         return handleAction(id: id, method: method, paramsValue: request["params"])
     default:
         return response(
@@ -210,6 +214,10 @@ private func handleAction(id: Any?, method: String, paramsValue: Any?) -> [Strin
         return response(id: id, result: failure)
     }
 
+    if method == "open" {
+        return response(id: id, result: performOpen(action: action, actionId: actionId, method: method))
+    }
+
     if !AXIsProcessTrusted() {
         return response(
             id: id,
@@ -224,6 +232,8 @@ private func handleAction(id: Any?, method: String, paramsValue: Any?) -> [Strin
     }
 
     switch method {
+    case "open":
+        break
     case "click":
         return response(id: id, result: performClick(action: action, actionId: actionId, method: method))
     case "type":
@@ -388,6 +398,70 @@ private func axElementSnapshot(
     return snapshot
 }
 
+private func performOpen(action: [String: Any], actionId: String, method: String) -> [String: Any] {
+    guard let target = actionTarget(action) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "INVALID_TARGET",
+            message: "open requires action.target."
+        )
+    }
+
+    guard let appURL = appBundleURL(target: target) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "TARGET_NOT_FOUND",
+            message: "Target app bundle could not be resolved."
+        )
+    }
+
+    let input = action["input"] as? [String: Any] ?? [:]
+    let filePath = nonEmptyString(input["filePath"])
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+
+    let semaphore = DispatchSemaphore(value: 0)
+    let openError = OpenErrorBox()
+
+    if let filePath {
+        let fileURL = URL(fileURLWithPath: filePath)
+        NSWorkspace.shared.open([fileURL], withApplicationAt: appURL, configuration: configuration) { _, error in
+            openError.error = error
+            semaphore.signal()
+        }
+    } else {
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            openError.error = error
+            semaphore.signal()
+        }
+    }
+
+    _ = semaphore.wait(timeout: .now() + 5)
+
+    if let error = openError.error {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Unable to open target app.",
+            details: ["error": error.localizedDescription]
+        )
+    }
+
+    usleep(800_000)
+
+    var metadata: [String: Any] = [
+        "bundleURL": appURL.path,
+    ]
+    if let filePath {
+        metadata["filePath"] = filePath
+    }
+
+    return passedActionResult(actionId: actionId, method: method, metadata: metadata)
+}
+
 private func performClick(action: [String: Any], actionId: String, method: String) -> [String: Any] {
     guard let target = actionTarget(action),
           let app = findRunningApp(target: target)
@@ -484,15 +558,57 @@ private func performType(action: [String: Any], actionId: String, method: String
         )
     }
 
+    let role = axString(element, kAXRoleAttribute)
     focusElement(element)
 
-    if isTextInputAXRole(axString(element, kAXRoleAttribute)),
-       isAXAttributeSettable(element, kAXValueAttribute)
-    {
-        let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
-        if error == .success {
-            return passedActionResult(actionId: actionId, method: method, metadata: ["text": text])
+    if isTextInputAXRole(role) {
+        if isAXAttributeSettable(element, kAXValueAttribute) {
+            let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+            if error == .success {
+                return passedActionResult(actionId: actionId, method: method, metadata: ["text": text])
+            }
         }
+
+        activateTargetApp(app)
+        focusElement(element)
+        usleep(200_000)
+
+        if pasteTextToPid(app.processIdentifier, text: text) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "text-input-paste"]
+            )
+        }
+
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Unable to paste text into text AX element.",
+            details: ["role": role ?? "unknown"]
+        )
+    }
+
+    if isSublimeTextTarget(target) {
+        activateTargetApp(app)
+        usleep(200_000)
+
+        guard pasteTextToPid(app.processIdentifier, text: text) else {
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "ACTION_FAILED",
+                message: "Unable to paste text into Sublime Text.",
+                details: ["role": role ?? "unknown"]
+            )
+        }
+
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["text": text, "inputMethod": "sublime-text-pid-paste"]
+        )
     }
 
     guard isQQMusicTarget(target), isQQMusicSearchElement(element) else {
@@ -501,7 +617,7 @@ private func performType(action: [String: Any], actionId: String, method: String
             method: method,
             code: "ACTION_FAILED",
             message: "Refusing to type into non-text AX element without an app-specific adapter.",
-            details: ["role": axString(element, kAXRoleAttribute) ?? "unknown"]
+            details: ["role": role ?? "unknown"]
         )
     }
 
@@ -556,7 +672,7 @@ private func performKey(action: [String: Any], actionId: String, method: String,
         )
     }
 
-    guard let keyCode = macKeyCode(key) else {
+    guard let keyChord = macKeyChord(key) else {
         return failedActionResult(
             actionId: actionId,
             method: method,
@@ -564,6 +680,28 @@ private func performKey(action: [String: Any], actionId: String, method: String,
             message: "Unsupported key '\(key)'."
         )
     }
+
+    if !keyChord.flags.isEmpty {
+        activateTargetApp(app)
+
+        if postKeyChordToPid(app.processIdentifier, chord: keyChord) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["key": key, "inputMethod": "key-chord"]
+            )
+        }
+
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Unable to post key chord to target app.",
+            details: ["key": key]
+        )
+    }
+
+    let keyCode = keyChord.keyCode
 
     if isQQMusicTarget(target) {
         activateTargetApp(app)
@@ -634,6 +772,8 @@ private func validateActionRequest(
     }
 
     switch method {
+    case "open":
+        break
     case "click":
         if !hasElement(action) && !hasPointInput(action) {
             return failedActionResult(
@@ -751,6 +891,33 @@ private func findRunningApp(target: [String: Any]) -> NSRunningApplication? {
     return nil
 }
 
+private func appBundleURL(target: [String: Any]) -> URL? {
+    if let app = findRunningApp(target: target),
+       let bundleURL = app.bundleURL
+    {
+        return bundleURL
+    }
+
+    if let targetId = nonEmptyString(target["id"]),
+       let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: targetId)
+    {
+        return bundleURL
+    }
+
+    let targetName = nonEmptyString(target["name"])?.lowercased()
+    guard let targetName else {
+        return nil
+    }
+
+    return NSWorkspace.shared.runningApplications.first { app in
+        guard let name = app.localizedName?.lowercased() else {
+            return false
+        }
+
+        return name == targetName || name.contains(targetName) || targetName.contains(name)
+    }?.bundleURL
+}
+
 private func resolveActionElement(_ action: [String: Any], expectedPid: pid_t? = nil) -> AXUIElement? {
     guard
         let element = action["element"] as? [String: Any],
@@ -780,6 +947,10 @@ private func resolveActionElement(_ action: [String: Any], expectedPid: pid_t? =
 
 private func isQQMusicTarget(_ target: [String: Any]) -> Bool {
     return nonEmptyString(target["id"])?.lowercased() == "com.tencent.qqmusicmac"
+}
+
+private func isSublimeTextTarget(_ target: [String: Any]) -> Bool {
+    return nonEmptyString(target["id"])?.lowercased() == "com.sublimetext.4"
 }
 
 private func isQQMusicSearchElement(_ element: AXUIElement) -> Bool {
@@ -958,7 +1129,7 @@ private func isIgnoredAXRole(_ role: String?) -> Bool {
 
 private func isTextInputAXRole(_ role: String?) -> Bool {
     switch role {
-    case "AXTextField", "AXTextArea", "AXSearchField":
+    case "AXTextField", "AXTextArea", "AXTextView", "AXSearchField":
         return true
     default:
         return false
@@ -1046,6 +1217,27 @@ private func postKeyboardShortcutToPid(_ pid: pid_t, keyCode: CGKeyCode) -> Bool
     keyDown.postToPid(pid)
     keyUp.postToPid(pid)
     commandUp.postToPid(pid)
+
+    return true
+}
+
+private func postKeyChordToPid(_ pid: pid_t, chord: KeyChord) -> Bool {
+    if chord.flags == CGEventFlags.maskCommand {
+        return postKeyboardShortcutToPid(pid, keyCode: chord.keyCode)
+    }
+
+    guard
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: chord.keyCode, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: chord.keyCode, keyDown: false)
+    else {
+        return false
+    }
+
+    down.flags = chord.flags
+    up.flags = chord.flags
+    down.postToPid(pid)
+    up.postToPid(pid)
+    usleep(300_000)
 
     return true
 }
@@ -1194,8 +1386,60 @@ private func firstNonEmpty(_ values: [String?]) -> String? {
     return values.compactMap { nonEmptyString($0) }.first
 }
 
+private struct KeyChord {
+    let keyCode: CGKeyCode
+    let flags: CGEventFlags
+}
+
+private func macKeyChord(_ key: String) -> KeyChord? {
+    let parts = key
+        .split(separator: "+")
+        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        .filter { !$0.isEmpty }
+
+    guard let baseKey = parts.last,
+          let keyCode = macKeyCode(baseKey)
+    else {
+        return nil
+    }
+
+    var flags = CGEventFlags()
+    for modifier in parts.dropLast() {
+        switch modifier {
+        case "command", "cmd", "meta":
+            flags.insert(.maskCommand)
+        case "shift":
+            flags.insert(.maskShift)
+        case "option", "alt":
+            flags.insert(.maskAlternate)
+        case "control", "ctrl":
+            flags.insert(.maskControl)
+        default:
+            return nil
+        }
+    }
+
+    return KeyChord(keyCode: keyCode, flags: flags)
+}
+
 private func macKeyCode(_ key: String) -> CGKeyCode? {
     switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "a":
+        return 0
+    case "s":
+        return 1
+    case "d":
+        return 2
+    case "f":
+        return 3
+    case "g":
+        return 5
+    case "c":
+        return 8
+    case "v":
+        return 9
+    case "n":
+        return 45
     case "enter", "return":
         return 36
     case "escape", "esc":

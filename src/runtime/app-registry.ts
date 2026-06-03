@@ -55,6 +55,15 @@ const APP_CAPABILITIES: AppCapability[] = [
     fallback: ["generic", "screen"],
     requiredPermissions: ["accessibility"],
   },
+  {
+    appId: "com.sublimetext.4",
+    displayName: "Sublime Text",
+    aliases: ["sublime", "sublime text"],
+    supportLevel: "automation",
+    adapters: ["mac-helper"],
+    fallback: ["automation", "generic", "screen"],
+    requiredPermissions: ["accessibility"],
+  },
 ]
 
 export function listAppCapabilities(): AppCapability[] {

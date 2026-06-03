@@ -14,6 +14,7 @@ export type MacHelperMethod =
   | "listApps"
   | "listWindows"
   | "getAppState"
+  | "open"
   | "click"
   | "type"
   | "key"
@@ -86,6 +87,7 @@ export interface MacHelperClient {
   listApps(): Promise<MacRunningApp[]>
   listWindows(target: Target): Promise<MacWindow[]>
   getAppState(target: Target): Promise<MacAppState>
+  open(params: MacActionParams): Promise<ActionResult>
   click(params: MacActionParams): Promise<ActionResult>
   typeText(params: MacTypeParams): Promise<ActionResult>
   key(params: MacKeyParams): Promise<ActionResult>

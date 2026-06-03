@@ -165,13 +165,7 @@ usecases/cases.yaml
 - CLI `--mac-helper <path>` native runner。
 - native action failure 写入 trace。
 
-状态：In progress。
-
-剩余：
-
-- 基础 accessibility tree。
-- 更明确的 permission hint。
-- helper smoke scripts。
+状态：Done。
 
 ### M7. Real Mac Actions
 
@@ -196,7 +190,20 @@ usecases/cases.yaml
 - 所有真实 action 先经过 policy。
 - 所有真实 action 写 trace。
 
-状态：Not started。
+状态：Done。
+
+已验证：
+
+- UC-100 (QQ Music) 和 UC-110 (Sublime Text) 完整通过。
+- click / type / key 真实执行。
+- app-specific fallback (paste-based type) 正常工作。
+- 文件系统验证证明真实完成，不只是 AX 状态。
+
+剩余：
+
+- scroll 实现（协议已就绪）。
+- element stale 错误路径验证。
+- screenshot fallback（作为通用能力）。
 
 ### M8. Browser Harness Adapter
 
@@ -230,6 +237,37 @@ usecases/cases.yaml
 - trace inspection workflow。
 
 状态：Not started。
+
+### M10. Multi-App Close Loop And Knowledge Capture
+
+目标：把 QQ Music 和第二个真实 App 串成可复用的接入闭环，并把判断、失败路径、验证证据和架构经验沉淀进仓库。
+
+包含：
+
+- `docs/task/{task-id}/progress.md`
+- `docs/task/{task-id}/plan/`
+- 任务级验证证据
+- 架构 review 记录
+- 长期知识上浮入口
+
+验收：
+
+- 至少两个真实 App case 可以被单独追踪。
+- 任务文档、代码和 trace 说的是同一件事。
+- 新 App 接入时，先看任务骨架，不靠口头记忆。
+
+状态：Done。
+
+已完成：
+
+- UC-100 (QQ Music) 和 UC-110 (Sublime Text) 两个真实 App 闭环。
+- `docs/task/260603-multi-app-close-loop/` 包含进度、计划、证据和 review。
+- 架构 review 指出下一步改进方向：建立 App adapter 模式。
+
+下一步建议：
+
+- 在接入第 3 个 App 之前，先重构为 App adapter 模式。
+- 参考 `docs/task/260603-multi-app-close-loop/review/architecture-review.md`。
 
 ## Agent Roles
 

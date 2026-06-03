@@ -78,6 +78,10 @@ export class MacHelperProcessClient implements MacHelperClient {
     return this.send<MacAppState>("getAppState", { target })
   }
 
+  async open(params: MacActionParams) {
+    return this.send<ActionResult>("open", params)
+  }
+
   async click(params: MacActionParams) {
     return this.send<ActionResult>("click", params)
   }

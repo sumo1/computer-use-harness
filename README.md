@@ -61,9 +61,9 @@ Claude Code / Codex / shell / future MCP
 - policy guard。
 - app capability registry。
 - TS / Swift helper protocol。
-- Swift native helper scaffold。
+- Swift native helper 实现。
 - native helper stdio JSON-RPC 长连接。
-- native runner，通过 `--mac-helper <path>` 把 helper action failure 写入 trace。
+- native runner，通过 `--mac-helper <path>` 把真实 action 执行结果写入 trace。
 
 当前 Swift helper 支持：
 
@@ -71,9 +71,22 @@ Claude Code / Codex / shell / future MCP
 - `listApps`
 - `listWindows`
 - `getAppState`
-- `click/type/key/scroll` 的请求校验和稳定失败返回
+- `open` - 启动 app 或打开文件
+- `click` - 点击 AX 元素或屏幕坐标
+- `type` - 输入文本（标准 AX 输入或 paste fallback）
+- `key` - 按键和快捷键
+- `scroll` - 滚动（协议就绪，实现待补充）
 
-当前还不会执行真实 UI 动作。合法 action 会被验证，然后返回 `UNIMPLEMENTED`。这是刻意的安全边界。
+**真实 usecase 已验证**：
+
+- **UC-100**: QQ Music 搜索"鸭子"并播放
+- **UC-110**: Sublime Text 编辑文件并保存，含文件系统验证
+
+两个 usecase 都包含完整 trace、policy decision、app-specific fallback 和外部验证证据。
+
+## 任务沉淀
+
+当前活跃任务和双契约入口放在 [`docs/task/260603-multi-app-close-loop/`](./docs/task/260603-multi-app-close-loop/).
 
 ## 什么时候用
 
@@ -171,19 +184,27 @@ cd native/mac-helper
 swift build
 ```
 
-### 5. 跑 native helper smoke
+### 5. 跑真实 usecase
 
 ```sh
-./dist/cli/index.js usecases run UC-030 \
+# QQ Music: 搜索"鸭子"并播放
+./dist/cli/index.js usecases run UC-100 \
   --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+
+# Sublime Text: 编辑并保存文件
+./dist/cli/index.js usecases run UC-110 \
+  --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+
+# 查看 trace
+./dist/cli/index.js trace --last
 ```
 
 预期结果：
 
 - CLI 返回 `ok: true`。
-- run status 可能是 `failed`。
-- trace 中会出现 native helper 返回的稳定失败码。
-- 不会执行真实点击或输入。
+- run status 为 `passed`（如果 app 已安装且有权限）。
+- trace 包含完整的 observation / action / policy / result 事件。
+- UC-110 会在 `/tmp/computer-use-harness/uc-110.txt` 留下真实文件。
 
 ## CLI
 

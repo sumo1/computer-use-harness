@@ -12,6 +12,11 @@ import type {
 import { ActionErrorCode } from "../core/errors.js"
 import { evaluatePolicy } from "../runtime/policy.js"
 import { appendTraceEvent, createUseCaseAction, createUseCaseTarget } from "./action-plan.js"
+import {
+  bindSublimeTextActionInput,
+  prepareSublimeTextUseCase,
+  verifySublimeTextAction,
+} from "./sublime-text.js"
 import type { UseCase, UseCaseRunResult, UseCaseStepResult } from "./types.js"
 
 export interface NativeUseCaseRunnerOptions {
@@ -39,6 +44,8 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   const steps: UseCaseStepResult[] = []
   let currentObservation: Observation | undefined
 
+  await prepareSublimeTextUseCase(useCase)
+
   appendTraceEvent(trace, {
     traceId,
     kind: "run",
@@ -52,10 +59,11 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
 
   for (const [index, description] of useCase.steps.entries()) {
     const stepIndex = index + 1
-    const action = bindElement(
+    const plannedAction = bindSublimeTextActionInput(
+      useCase,
       createUseCaseAction(useCase.id, stepIndex, description, target, "mac-helper"),
-      currentObservation,
     )
+    const action = bindElement(plannedAction, currentObservation)
     const policy = evaluatePolicy({ target, actionKind: action.kind })
 
     appendTraceEvent(trace, {
@@ -148,14 +156,26 @@ async function executeNativeAction(
   helper: MacHelperClient,
   action: Action,
 ): Promise<{ result: ActionResult; observation?: Observation }> {
-  if (action.kind === "observe" || action.kind === "open") {
+  if (action.kind === "open") {
+    const openResult = await helper.open({ action })
     const appState = await helper.getAppState(action.target)
-    const verificationFailure = verifyObservation(action, appState.observation)
+    return {
+      observation: appState.observation,
+      result: {
+        ...openResult,
+        observation: appState.observation,
+      },
+    }
+  }
 
-    if (verificationFailure) {
+  if (action.kind === "observe") {
+    const appState = await helper.getAppState(action.target)
+    const verificationResult = await verifyObservation(action, appState.observation)
+
+    if (verificationResult) {
       return {
         observation: appState.observation,
-        result: verificationFailure,
+        result: verificationResult,
       }
     }
 
@@ -217,12 +237,66 @@ async function executeNativeAction(
 }
 
 function bindElement(action: Action, observation: Observation | undefined): Action {
-  if (!observation || (action.kind !== "type" && action.kind !== "click")) {
+  if (!observation) {
     return action
   }
 
   const description = stringInput(action, "description", "").toLowerCase()
-  const point = action.kind === "click" ? qqMusicSearchAllPlayPoint(action, observation) : undefined
+
+  // Sublime Text: type into document (use window as element placeholder)
+  if (action.kind === "type" && isSublimeTextTarget(action.target)) {
+    const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
+    if (docWindow) {
+      return {
+        ...action,
+        element: docWindow,
+        input: {
+          ...(action.input ?? {}),
+          elementBinding: "sublime-text-window",
+        },
+      }
+    }
+    return action
+  }
+
+  if (action.kind !== "click") {
+    return action
+  }
+
+  // Sublime Text: dismiss registration dialog
+  if (description.includes("dismiss registration dialog")) {
+    const cancelButton = findButton(observation.elements, "Cancel")
+    if (cancelButton) {
+      return {
+        ...action,
+        element: cancelButton,
+        input: {
+          ...(action.input ?? {}),
+          elementBinding: "sublime-cancel-button",
+        },
+      }
+    }
+    return action
+  }
+
+  // Sublime Text: focus document window
+  if (description.includes("focus document window")) {
+    const docWindow = findWindowByTitle(observation.elements, "uc-110.txt")
+    if (docWindow) {
+      return {
+        ...action,
+        element: docWindow,
+        input: {
+          ...(action.input ?? {}),
+          elementBinding: "sublime-document-window",
+        },
+      }
+    }
+    return action
+  }
+
+  // QQ Music: search all play point
+  const point = qqMusicSearchAllPlayPoint(action, observation)
   if (point) {
     return {
       ...action,
@@ -234,10 +308,8 @@ function bindElement(action: Action, observation: Observation | undefined): Acti
     }
   }
 
-  const element =
-    action.kind === "type"
-      ? findSearchInput(observation.elements)
-      : findPlayableDuck(observation.elements)
+  // QQ Music: search input or playable duck
+  const element = findSearchInput(observation.elements) ?? findPlayableDuck(observation.elements)
 
   if (!element) {
     return action
@@ -253,7 +325,15 @@ function bindElement(action: Action, observation: Observation | undefined): Acti
   }
 }
 
-function verifyObservation(action: Action, observation: Observation): ActionResult | undefined {
+async function verifyObservation(
+  action: Action,
+  observation: Observation,
+): Promise<ActionResult | undefined> {
+  const sublimeVerification = await verifySublimeTextAction(action, observation)
+  if (sublimeVerification) {
+    return sublimeVerification
+  }
+
   if (!isQQMusicPlaybackVerificationStep(action)) {
     return undefined
   }
@@ -354,12 +434,22 @@ function visibleNonMenuElements(elements: ElementRef[]): ElementRef[] {
   })
 }
 
+function isSublimeTextTarget(target: Action["target"]): boolean {
+  return normalize(target.id) === "com.sublimetext.4"
+}
+
 function isQQMusicTarget(target: Action["target"]): boolean {
   return normalize(target.id) === "com.tencent.qqmusicmac"
 }
 
 function isTextInputRole(role: string): boolean {
-  return role.includes("textfield") || role.includes("textbox") || role.includes("searchfield")
+  return (
+    role.includes("textfield") ||
+    role.includes("textbox") ||
+    role.includes("textarea") ||
+    role.includes("textview") ||
+    role.includes("searchfield")
+  )
 }
 
 function isPressableRole(role: string): boolean {
@@ -402,6 +492,24 @@ function permissionMetadata(permissions: MacPermissionStatus) {
     screenRecording: permissions.screenRecording,
     inputMonitoring: permissions.inputMonitoring,
   }
+}
+
+function findButton(elements: ElementRef[], buttonName: string): ElementRef | undefined {
+  const normalizedName = normalize(buttonName)
+  return visibleNonMenuElements(elements).find((element) => {
+    const role = normalize(element.role)
+    const name = normalize(element.name)
+    return role.includes("button") && name === normalizedName
+  })
+}
+
+function findWindowByTitle(elements: ElementRef[], titlePart: string): ElementRef | undefined {
+  const normalizedTitle = normalize(titlePart)
+  return elements.find((element) => {
+    const role = normalize(element.role)
+    const name = normalize(element.name)
+    return role.includes("window") && name.includes(normalizedTitle)
+  })
 }
 
 function runStatus(steps: UseCaseStepResult[]): UseCaseRunResult["status"] {

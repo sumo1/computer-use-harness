@@ -38,6 +38,10 @@ export function createFakeMacHelperClient(): MacHelperClient {
       }
     },
 
+    async open(params: MacActionParams) {
+      return passedResult(params.action.id)
+    },
+
     async click(params: MacActionParams) {
       return passedResult(params.action.id)
     },
