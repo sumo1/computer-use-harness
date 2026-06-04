@@ -52,7 +52,7 @@ export class DialogHandlerCapability implements Capability {
       metadata: {
         source: "dialog-handler",
         dialogType: dialog.type,
-        buttons: dialog.buttons.map((b) => b.name || ""),
+        buttons: dialog.buttons.map((b) => b?.name || ""),
         autoHandled: false,
         needsUserDecision: true,
       },
