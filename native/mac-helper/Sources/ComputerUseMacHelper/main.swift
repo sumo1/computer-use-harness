@@ -95,7 +95,7 @@ private func handleRequest(_ request: [String: Any]) -> [String: Any] {
         return response(id: id, result: appState(params: params))
     case "screenshot":
         return handleScreenshot(id: id, params: params)
-    case "open", "click", "type", "key", "scroll":
+    case "open", "click", "secondary-click", "hover", "drag", "type", "key", "scroll":
         return handleAction(id: id, method: method, paramsValue: request["params"])
     default:
         return response(
@@ -171,22 +171,58 @@ private func appState(params: [String: Any]) -> [String: Any] {
     let windows = listWindows(params: params)
     let elements = collectAXElements(target: target)
 
+    let permissions: [String: String] = [
+        "accessibility": AXIsProcessTrusted() ? "granted" : "missing",
+        "screenRecording": CGPreflightScreenCaptureAccess() ? "granted" : "missing",
+        "inputMonitoring": "unknown",
+    ]
+
+    var observation: [String: Any] = [
+        "id": "\(target["id"] as? String ?? "target"):observation:mac-helper",
+        "target": target,
+        "source": "mac-helper",
+        "timestamp": timestamp(),
+        "elements": elements,
+        "metadata": [
+            "helperMethod": "getAppState",
+            "windowCount": windows.count,
+            "elementCount": elements.count,
+            "accessibility": permissions["accessibility"] ?? "unknown",
+        ],
+    ]
+
+    if permissions["screenRecording"] == "granted", let screenshot = captureAppScreenshot(target: target) {
+        observation["screenshot"] = screenshot
+    }
+
+    if !elements.isEmpty {
+        observation["accessibilityTree"] = buildAccessibilityTree(elements: elements)
+    }
+
+    if let focusedId = findFocusedElementId(elements: elements) {
+        observation["focusedElementId"] = focusedId
+    }
+
+    if let focusedWin = findFocusedWindow(windows: windows, target: target) {
+        observation["focusedWindow"] = focusedWin
+    }
+
+    observation["windows"] = windows
+
+    if let mainScreen = NSScreen.main {
+        observation["coordinateSpace"] = [
+            "screenWidth": mainScreen.frame.width,
+            "screenHeight": mainScreen.frame.height,
+            "scale": mainScreen.backingScaleFactor,
+        ]
+    }
+
+    observation["permissions"] = permissions
+
     return [
         "target": target,
         "windows": windows,
-        "observation": [
-            "id": "\(target["id"] as? String ?? "target"):observation:mac-helper",
-            "target": target,
-            "source": "mac-helper",
-            "timestamp": timestamp(),
-            "elements": elements,
-            "metadata": [
-                "helperMethod": "getAppState",
-                "windowCount": windows.count,
-                "elementCount": elements.count,
-                "accessibility": AXIsProcessTrusted() ? "granted" : "missing",
-            ],
-        ],
+        "observation": observation,
     ]
 }
 
@@ -238,6 +274,12 @@ private func handleAction(id: Any?, method: String, paramsValue: Any?) -> [Strin
         break
     case "click":
         return response(id: id, result: performClick(action: action, actionId: actionId, method: method))
+    case "secondary-click":
+        return response(id: id, result: performSecondaryClick(action: action, actionId: actionId, method: method))
+    case "hover":
+        return response(id: id, result: performHover(action: action, actionId: actionId, method: method))
+    case "drag":
+        return response(id: id, result: performDrag(action: action, actionId: actionId, method: method))
     case "type":
         return response(
             id: id,
@@ -256,6 +298,17 @@ private func handleAction(id: Any?, method: String, paramsValue: Any?) -> [Strin
                 actionId: actionId,
                 method: method,
                 key: nonEmptyString(params["key"]) ?? ""
+            )
+        )
+    case "scroll":
+        return response(
+            id: id,
+            result: performScroll(
+                action: action,
+                actionId: actionId,
+                method: method,
+                direction: nonEmptyString(params["direction"]) ?? "",
+                amount: numberDouble(params["amount"]) ?? 1.0
             )
         )
     default:
@@ -294,6 +347,161 @@ private func collectAXElements(target: [String: Any]) -> [[String: Any]] {
     )
 
     return elements
+}
+
+private func captureAppScreenshot(target: [String: Any]) -> [String: Any]? {
+    guard let app = findRunningApp(target: target) else {
+        return nil
+    }
+
+    let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+
+    let appWindows = windows.filter { window in
+        if let owner = window[kCGWindowOwnerPID as String] as? Int32 {
+            return owner == app.processIdentifier
+        }
+        return false
+    }
+
+    guard let mainWindow = appWindows.first,
+          let windowNumber = mainWindow[kCGWindowNumber as String] as? CGWindowID else {
+        return nil
+    }
+
+    guard let cgImage = CGWindowListCreateImage(
+        .null,
+        .optionIncludingWindow,
+        windowNumber,
+        [.boundsIgnoreFraming, .bestResolution]
+    ) else {
+        return nil
+    }
+
+    let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+    guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+        return nil
+    }
+
+    return [
+        "format": "png",
+        "data": pngData.base64EncodedString(),
+        "width": cgImage.width,
+        "height": cgImage.height,
+        "timestamp": timestamp(),
+    ]
+}
+
+private struct AccessibilityTreeEntry {
+    let path: [Int]
+    let node: [String: Any]
+}
+
+private func buildAccessibilityTree(elements: [[String: Any]]) -> [[String: Any]] {
+    let entries = elements.compactMap { accessibilityTreeEntry(element: $0) }
+    let roots = entries.filter { $0.path.isEmpty }
+
+    if !roots.isEmpty {
+        return roots.map { accessibilityTreeNode(entry: $0, entries: entries) }
+    }
+
+    let minimumDepth = entries.map { $0.path.count }.min()
+    guard let minimumDepth else {
+        return []
+    }
+
+    return entries
+        .filter { $0.path.count == minimumDepth }
+        .map { accessibilityTreeNode(entry: $0, entries: entries) }
+}
+
+private func accessibilityTreeEntry(element: [String: Any]) -> AccessibilityTreeEntry? {
+    guard let id = element["id"] as? String,
+          let role = element["role"] as? String,
+          let metadata = element["metadata"] as? [String: Any],
+          let pathString = metadata["path"] as? String,
+          let path = decodeAXPath(pathString)
+    else {
+        return nil
+    }
+
+    var node: [String: Any] = [
+        "id": id,
+        "role": role,
+        "metadata": metadata,
+    ]
+
+    if let name = element["name"] as? String {
+        node["name"] = name
+    }
+    if let value = metadata["value"] as? String {
+        node["value"] = value
+    }
+    if let frame = metadata["frame"] as? [String: Any] {
+        node["bounds"] = frame
+    }
+
+    return AccessibilityTreeEntry(path: path, node: node)
+}
+
+private func accessibilityTreeNode(entry: AccessibilityTreeEntry, entries: [AccessibilityTreeEntry]) -> [String: Any] {
+    var node = entry.node
+    let children = entries
+        .filter { isDirectChildPath($0.path, of: entry.path) }
+        .sorted { encodeAXPath($0.path) < encodeAXPath($1.path) }
+        .map { accessibilityTreeNode(entry: $0, entries: entries) }
+
+    if !children.isEmpty {
+        node["children"] = children
+    }
+
+    return node
+}
+
+private func isDirectChildPath(_ path: [Int], of parentPath: [Int]) -> Bool {
+    guard path.count == parentPath.count + 1 else {
+        return false
+    }
+
+    return Array(path.dropLast()) == parentPath
+}
+
+private func decodeAXPath(_ path: String) -> [Int]? {
+    if path == "root" {
+        return []
+    }
+
+    let parts = path.split(separator: ".")
+    let decoded = parts.compactMap { Int($0) }
+    return decoded.count == parts.count ? decoded : nil
+}
+
+private func findFocusedElementId(elements: [[String: Any]]) -> String? {
+    for element in elements {
+        if let metadata = element["metadata"] as? [String: Any],
+           let focused = metadata["focused"] as? Bool,
+           focused,
+           let id = element["id"] as? String {
+            return id
+        }
+    }
+    return nil
+}
+
+private func findFocusedWindow(windows: [[String: Any]], target: [String: Any]) -> [String: Any]? {
+    guard let app = findRunningApp(target: target) else {
+        return nil
+    }
+
+    // Check if app is frontmost
+    let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+
+    if isFrontmost, let firstWindow = windows.first {
+        var focusedWin = firstWindow
+        focusedWin["focused"] = true
+        return focusedWin
+    }
+
+    return nil
 }
 
 private func collectAXElement(
@@ -539,6 +747,140 @@ private func performClick(action: [String: Any], actionId: String, method: Strin
     )
 }
 
+private func performSecondaryClick(action: [String: Any], actionId: String, method: String) -> [String: Any] {
+    guard let target = actionTarget(action),
+          let app = findRunningApp(target: target)
+    else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "TARGET_NOT_FOUND",
+            message: "Target app is not running."
+        )
+    }
+
+    guard let point = actionPoint(action) ?? actionElementCenter(action, expectedPid: app.processIdentifier) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ELEMENT_NOT_FOUND",
+            message: "secondary-click requires a resolvable point or action.element."
+        )
+    }
+
+    activateTargetApp(app)
+
+    guard postMouseButtonToHidWhenFrontmost(
+        app.processIdentifier,
+        point: point,
+        button: .right,
+        downType: .rightMouseDown,
+        upType: .rightMouseUp
+    ) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Refusing secondary click because target app is not the front layer-zero window at that point.",
+            details: ["x": point.x, "y": point.y]
+        )
+    }
+
+    return passedActionResult(
+        actionId: actionId,
+        method: method,
+        metadata: ["inputMethod": "verified-hid-secondary-click", "x": point.x, "y": point.y]
+    )
+}
+
+private func performHover(action: [String: Any], actionId: String, method: String) -> [String: Any] {
+    guard let target = actionTarget(action),
+          let app = findRunningApp(target: target)
+    else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "TARGET_NOT_FOUND",
+            message: "Target app is not running."
+        )
+    }
+
+    guard let point = actionPoint(action) ?? actionElementCenter(action, expectedPid: app.processIdentifier) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ELEMENT_NOT_FOUND",
+            message: "hover requires a resolvable point or action.element."
+        )
+    }
+
+    activateTargetApp(app)
+
+    guard postMouseMoveToHidWhenFrontmost(app.processIdentifier, point: point) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Refusing hover because target app is not the front layer-zero window at that point.",
+            details: ["x": point.x, "y": point.y]
+        )
+    }
+
+    return passedActionResult(
+        actionId: actionId,
+        method: method,
+        metadata: ["inputMethod": "verified-hid-hover", "x": point.x, "y": point.y]
+    )
+}
+
+private func performDrag(action: [String: Any], actionId: String, method: String) -> [String: Any] {
+    guard let target = actionTarget(action),
+          let app = findRunningApp(target: target)
+    else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "TARGET_NOT_FOUND",
+            message: "Target app is not running."
+        )
+    }
+
+    guard let start = actionPoint(action) ?? actionElementCenter(action, expectedPid: app.processIdentifier),
+          let end = dragEndPoint(action, start: start)
+    else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "INVALID_REQUEST",
+            message: "drag requires a resolvable start point and destination."
+        )
+    }
+
+    activateTargetApp(app)
+
+    guard postMouseDragToHidWhenFrontmost(app.processIdentifier, from: start, to: end) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Refusing drag because target app is not the front layer-zero window at the start point.",
+            details: ["fromX": start.x, "fromY": start.y, "toX": end.x, "toY": end.y]
+        )
+    }
+
+    return passedActionResult(
+        actionId: actionId,
+        method: method,
+        metadata: [
+            "inputMethod": "verified-hid-drag",
+            "fromX": start.x,
+            "fromY": start.y,
+            "toX": end.x,
+            "toY": end.y,
+        ]
+    )
+}
+
 private func performType(action: [String: Any], actionId: String, method: String, text: String) -> [String: Any] {
     guard let target = actionTarget(action),
           let app = findRunningApp(target: target)
@@ -708,6 +1050,13 @@ private func performKey(action: [String: Any], actionId: String, method: String,
     if isQQMusicTarget(target) {
         activateTargetApp(app)
 
+        if let element = resolveActionElement(action, expectedPid: app.processIdentifier),
+           isQQMusicSearchElement(element)
+        {
+            _ = clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
+            usleep(200_000)
+        }
+
         if postKeyToHidWhenFrontmost(app.processIdentifier, keyCode: keyCode) {
             return passedActionResult(
                 actionId: actionId,
@@ -734,6 +1083,93 @@ private func performKey(action: [String: Any], actionId: String, method: String,
     usleep(500_000)
 
     return passedActionResult(actionId: actionId, method: method, metadata: ["key": key])
+}
+
+private func performScroll(
+    action: [String: Any],
+    actionId: String,
+    method: String,
+    direction: String,
+    amount: Double
+) -> [String: Any] {
+    guard let target = actionTarget(action),
+          let app = findRunningApp(target: target)
+    else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "TARGET_NOT_FOUND",
+            message: "Target app is not running."
+        )
+    }
+
+    var scrollElement: AXUIElement? = resolveActionElement(action, expectedPid: app.processIdentifier)
+
+    if scrollElement == nil {
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedRef: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+        if error == .success, let focused = focusedRef {
+            scrollElement = focused as! AXUIElement
+        }
+    }
+
+    let scrollAmount = max(1, Int32((amount * 10).rounded()))
+    let (deltaX, deltaY): (Int32, Int32) = {
+        switch direction {
+        case "up":
+            return (0, scrollAmount)
+        case "down":
+            return (0, -scrollAmount)
+        case "left":
+            return (scrollAmount, 0)
+        case "right":
+            return (-scrollAmount, 0)
+        default:
+            return (0, 0)
+        }
+    }()
+
+    activateTargetApp(app)
+
+    guard let scrollEvent = CGEvent(
+        scrollWheelEvent2Source: nil,
+        units: .pixel,
+        wheelCount: 2,
+        wheel1: deltaY,
+        wheel2: deltaX,
+        wheel3: 0
+    ) else {
+        return failedActionResult(
+            actionId: actionId,
+            method: method,
+            code: "ACTION_FAILED",
+            message: "Failed to create scroll event."
+        )
+    }
+
+    var metadata: [String: Any] = [
+        "direction": direction,
+        "amount": amount,
+        "deltaX": deltaX,
+        "deltaY": deltaY,
+        "inputMethod": "scroll-wheel",
+    ]
+
+    if let element = scrollElement, let center = axElementCenter(element) {
+        scrollEvent.location = center
+        metadata["x"] = center.x
+        metadata["y"] = center.y
+    }
+
+    scrollEvent.postToPid(app.processIdentifier)
+    usleep(200_000)
+
+    return passedActionResult(
+        actionId: actionId,
+        method: method,
+        metadata: metadata
+    )
 }
 
 private func focusElement(_ element: AXUIElement) {
@@ -783,6 +1219,33 @@ private func validateActionRequest(
                 method: method,
                 code: "INVALID_REQUEST",
                 message: "click requires action.element or numeric action.input.x/y."
+            )
+        }
+    case "secondary-click", "hover":
+        if !hasElement(action) && !hasPointInput(action) {
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "INVALID_REQUEST",
+                message: "\(method) requires action.element or numeric action.input.x/y."
+            )
+        }
+    case "drag":
+        if !hasElement(action) && !hasPointInput(action) {
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "INVALID_REQUEST",
+                message: "drag requires action.element or numeric action.input.x/y as a start point."
+            )
+        }
+
+        if !hasDragDestination(action) {
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "INVALID_REQUEST",
+                message: "drag requires numeric action.input.toX/toY or deltaX/deltaY."
             )
         }
     case "type":
@@ -1000,6 +1463,15 @@ private func clickElementCenterToPid(_ element: AXUIElement, pid: pid_t) -> Bool
 }
 
 private func clickElementCenterToHidWhenFrontmost(_ element: AXUIElement, pid: pid_t) -> Bool {
+    guard let point = axElementCenter(element)
+    else {
+        return false
+    }
+
+    return postMouseClickToHidWhenFrontmost(pid, point: point)
+}
+
+private func axElementCenter(_ element: AXUIElement) -> CGPoint? {
     guard let frame = axFrame(element),
           let x = frame["x"] as? CGFloat,
           let y = frame["y"] as? CGFloat,
@@ -1008,10 +1480,10 @@ private func clickElementCenterToHidWhenFrontmost(_ element: AXUIElement, pid: p
           width > 0,
           height > 0
     else {
-        return false
+        return nil
     }
 
-    return postMouseClickToHidWhenFrontmost(pid, point: CGPoint(x: x + width / 2, y: y + height / 2))
+    return CGPoint(x: x + width / 2, y: y + height / 2)
 }
 
 private func postMouseClickToPid(_ pid: pid_t, point: CGPoint) -> Bool {
@@ -1040,6 +1512,22 @@ private func postMouseClickToPid(_ pid: pid_t, point: CGPoint) -> Bool {
 }
 
 private func postMouseClickToHidWhenFrontmost(_ pid: pid_t, point: CGPoint) -> Bool {
+    return postMouseButtonToHidWhenFrontmost(
+        pid,
+        point: point,
+        button: .left,
+        downType: .leftMouseDown,
+        upType: .leftMouseUp
+    )
+}
+
+private func postMouseButtonToHidWhenFrontmost(
+    _ pid: pid_t,
+    point: CGPoint,
+    button: CGMouseButton,
+    downType: CGEventType,
+    upType: CGEventType
+) -> Bool {
     guard frontLayerZeroWindowPid(at: point) == pid else {
         return false
     }
@@ -1047,15 +1535,15 @@ private func postMouseClickToHidWhenFrontmost(_ pid: pid_t, point: CGPoint) -> B
     guard
         let down = CGEvent(
             mouseEventSource: nil,
-            mouseType: .leftMouseDown,
+            mouseType: downType,
             mouseCursorPosition: point,
-            mouseButton: .left
+            mouseButton: button
         ),
         let up = CGEvent(
             mouseEventSource: nil,
-            mouseType: .leftMouseUp,
+            mouseType: upType,
             mouseCursorPosition: point,
-            mouseButton: .left
+            mouseButton: button
         )
     else {
         return false
@@ -1064,6 +1552,64 @@ private func postMouseClickToHidWhenFrontmost(_ pid: pid_t, point: CGPoint) -> B
     down.post(tap: .cghidEventTap)
     up.post(tap: .cghidEventTap)
     usleep(150_000)
+
+    return true
+}
+
+private func postMouseMoveToHidWhenFrontmost(_ pid: pid_t, point: CGPoint) -> Bool {
+    guard frontLayerZeroWindowPid(at: point) == pid else {
+        return false
+    }
+
+    guard let move = CGEvent(
+        mouseEventSource: nil,
+        mouseType: .mouseMoved,
+        mouseCursorPosition: point,
+        mouseButton: .left
+    ) else {
+        return false
+    }
+
+    move.post(tap: .cghidEventTap)
+    usleep(100_000)
+
+    return true
+}
+
+private func postMouseDragToHidWhenFrontmost(_ pid: pid_t, from start: CGPoint, to end: CGPoint) -> Bool {
+    guard frontLayerZeroWindowPid(at: start) == pid else {
+        return false
+    }
+
+    guard
+        let down = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: start,
+            mouseButton: .left
+        ),
+        let drag = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDragged,
+            mouseCursorPosition: end,
+            mouseButton: .left
+        ),
+        let up = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseUp,
+            mouseCursorPosition: end,
+            mouseButton: .left
+        )
+    else {
+        return false
+    }
+
+    down.post(tap: .cghidEventTap)
+    usleep(100_000)
+    drag.post(tap: .cghidEventTap)
+    usleep(150_000)
+    up.post(tap: .cghidEventTap)
+    usleep(200_000)
 
     return true
 }
@@ -1545,15 +2091,51 @@ private func hasPointInput(_ action: [String: Any]) -> Bool {
     return isNumber(input["x"]) && isNumber(input["y"])
 }
 
+private func hasDragDestination(_ action: [String: Any]) -> Bool {
+    guard let input = action["input"] as? [String: Any] else {
+        return false
+    }
+
+    return (isNumber(input["toX"]) && isNumber(input["toY"]))
+        || (isNumber(input["deltaX"]) && isNumber(input["deltaY"]))
+}
+
 private func actionPoint(_ action: [String: Any]) -> CGPoint? {
+    return actionPoint(action, xKey: "x", yKey: "y")
+}
+
+private func actionPoint(_ action: [String: Any], xKey: String, yKey: String) -> CGPoint? {
     guard let input = action["input"] as? [String: Any],
-          let x = input["x"] as? NSNumber,
-          let y = input["y"] as? NSNumber
+          let x = input[xKey] as? NSNumber,
+          let y = input[yKey] as? NSNumber
     else {
         return nil
     }
 
     return CGPoint(x: x.doubleValue, y: y.doubleValue)
+}
+
+private func actionElementCenter(_ action: [String: Any], expectedPid: pid_t) -> CGPoint? {
+    guard let element = resolveActionElement(action, expectedPid: expectedPid) else {
+        return nil
+    }
+
+    return axElementCenter(element)
+}
+
+private func dragEndPoint(_ action: [String: Any], start: CGPoint) -> CGPoint? {
+    if let point = actionPoint(action, xKey: "toX", yKey: "toY") {
+        return point
+    }
+
+    guard let input = action["input"] as? [String: Any],
+          let deltaX = input["deltaX"] as? NSNumber,
+          let deltaY = input["deltaY"] as? NSNumber
+    else {
+        return nil
+    }
+
+    return CGPoint(x: start.x + deltaX.doubleValue, y: start.y + deltaY.doubleValue)
 }
 
 private func isPositiveNumber(_ value: Any) -> Bool {
@@ -1562,6 +2144,14 @@ private func isPositiveNumber(_ value: Any) -> Bool {
     }
 
     return number.doubleValue > 0
+}
+
+private func numberDouble(_ value: Any?) -> Double? {
+    guard let number = value as? NSNumber else {
+        return nil
+    }
+
+    return number.doubleValue
 }
 
 private func isNumber(_ value: Any?) -> Bool {

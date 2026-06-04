@@ -9,7 +9,7 @@ export class CoordinateClicker implements Capability {
   readonly name = "coordinate-clicker"
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
-    if (action.kind !== "click") {
+    if (!canUseCoordinateTarget(action.kind)) {
       return false
     }
 
@@ -80,9 +80,9 @@ export class CoordinateClicker implements Capability {
     observation: Observation,
   ): { x: number; y: number } | undefined {
     // Simple case: relative to a named element
-    const refElement = observation.elements.find((el: { name?: string }) =>
-      normalize(el.name).includes(normalize(hint.relative)),
-    )
+    const refElement = observation.elements
+      .filter((el: { name?: string }) => normalize(el.name).includes(normalize(hint.relative)))
+      .sort((left, right) => frameArea(right.metadata?.frame) - frameArea(left.metadata?.frame))[0]
 
     if (refElement) {
       const frame = refElement.metadata?.frame
@@ -119,4 +119,16 @@ function normalize(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function frameArea(value: unknown): number {
+  if (!isRecord(value) || typeof value.width !== "number" || typeof value.height !== "number") {
+    return 0
+  }
+
+  return value.width * value.height
+}
+
+function canUseCoordinateTarget(kind: Action["kind"]): boolean {
+  return kind === "click" || kind === "secondary-click" || kind === "hover" || kind === "drag"
 }

@@ -9,7 +9,7 @@ export class TextInputHandler implements Capability {
   readonly name = "text-input-handler"
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
-    if (action.kind !== "type") {
+    if (action.kind !== "type" && action.kind !== "key") {
       return false
     }
 

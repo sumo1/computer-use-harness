@@ -196,19 +196,21 @@
     platform: macos
     permissions:
       - accessibility
+      - screenRecording
   steps:
     - open app
     - read app state
-    - type 周杰伦 专辑 into search input
-    - press key Enter
+    - type 周杰伦 into search input
+    - press key Enter in search input wait for state change timeout 5s
     - wait for search results to load
-    - verify we are on search results page
-    - extract Jay Chou latest album information from current page
+    - click tab named 专辑
+    - wait for album results to load
+    - extract latest Jay Chou album from visible album results; only accept entries where artist is 周杰伦, compare release dates, and return albumName releaseDate artist
   success:
     - QQ音乐 is the target app
     - search query submitted
-    - search results loaded and verified
-    - album information extracted successfully
+    - album tab loaded
+    - latest Jay Chou album name artist and release date extracted successfully
 
 - id: UC-103
   title: Extract current QQ Music page information

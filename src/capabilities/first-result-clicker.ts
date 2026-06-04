@@ -9,7 +9,7 @@ export class FirstResultClicker implements Capability {
   readonly name = "first-result-clicker"
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
-    if (action.kind !== "click") {
+    if (action.kind !== "click" && action.kind !== "secondary-click") {
       return false
     }
 

@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk"
-import type { Action, Observation } from "../core/contracts.js"
+import type { AccessibilityNode, Action, Observation } from "../core/contracts.js"
 import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
 import type { Capability, CapabilityResult, SemanticHints } from "./capability.js"
 
@@ -39,7 +39,7 @@ export class ScreenshotVisionCapability implements Capability {
 
     try {
       const result = this.helper
-        ? await this.extractWithScreenshot(action, query)
+        ? await this.extractWithScreenshot(action, observation, query)
         : await this.extractWithAXTree(observation, query)
 
       return {
@@ -58,24 +58,35 @@ export class ScreenshotVisionCapability implements Capability {
     }
   }
 
-  private async extractWithScreenshot(action: Action, query: string): Promise<Record<string, unknown>> {
+  private async extractWithScreenshot(
+    action: Action,
+    observation: Observation,
+    query: string,
+  ): Promise<Record<string, unknown>> {
     if (!this.helper) {
       throw new Error("Helper client not provided")
     }
 
-    // Take screenshot
     const screenshot = await this.helper.screenshot(action.target)
+    const accessibilityContext = this.buildAccessibilityContext(observation)
 
-    const prompt = `You are analyzing a QQ Music application window.
+    const prompt = `You are analyzing an application window.
 
 Task: ${query}
 
-Look for album information, including album names, release dates, and artist information.
+Use both sources of evidence:
+1. The screenshot shows the current visual state.
+2. The accessibility context may contain visible text, link labels, headings, list items, and hidden-but-associated values such as dates.
+
+Accessibility context:
+${accessibilityContext}
+
+Follow the task constraints exactly. If the task asks for albums, look for album names, release dates, and artist information. Ignore unrelated entries, controls, playback text, playlists, and decorative content. If multiple matching entries are present, compare release dates and choose the newest one.
 
 Return ONLY valid JSON (no markdown), for example:
-{"albumName": "最伟大的作品", "releaseYear": "2022", "artist": "周杰伦"}
+{"albumName": "太阳之子", "releaseDate": "2026-03-25", "artist": "周杰伦"}
 
-If no clear album information is found, return: {"status": "no_album_info_found", "reason": "describe what you see"}`
+If the required fields are not present in either the screenshot or accessibility context, return: {"status": "no_album_info_found", "reason": "describe the missing fields and visible candidates"}`
 
     const response = await this.anthropic.messages.create({
       model: "claude-opus-4-8",
@@ -116,35 +127,21 @@ If no clear album information is found, return: {"status": "no_album_info_found"
   }
 
   private async extractWithAXTree(observation: Observation, query: string): Promise<Record<string, unknown>> {
-    // Prepare context from observation - include more elements
-    const elementList = observation.elements
-      .filter((el) => {
-        const frame = el.metadata?.frame
-        const width = this.isRecord(frame) && typeof frame.width === "number" ? frame.width : 0
-        return width > 20 && el.name
-      })
-      .map((el) => `- ${el.role}: "${el.name}"`)
-      .slice(0, 150)
-      .join("\n")
+    const accessibilityContext = this.buildAccessibilityContext(observation)
 
-    const prompt = `You are analyzing a QQ Music application window showing search results for "周杰伦" (Jay Chou).
+    const prompt = `You are analyzing an application window from accessibility data.
 
-Available UI elements from the window:
-${elementList}
+Accessibility context:
+${accessibilityContext}
 
 Task: ${query}
 
-Look for elements that contain album names, particularly recent albums. Common patterns:
-- AXLink with album names
-- AXStaticText with album titles
-- Elements with "专辑" (album) in the name
-
-Based on the elements above, identify Jay Chou's albums and return information about the most recent one.
+Use link labels, headings, static text, row/cell labels, and date-like values from the context. Follow the task constraints exactly. Ignore unrelated controls and decorative content. If multiple matching entries are present, compare release dates and choose the newest one.
 
 Return ONLY valid JSON (no markdown), for example:
-{"albumName": "最伟大的作品", "releaseInfo": "2022"}
+{"albumName": "太阳之子", "releaseDate": "2026-03-25", "artist": "周杰伦"}
 
-If no clear album information is found, return: {"status": "no_album_info_found", "availableInfo": "describe what you see"}`
+If the required fields are not present, return: {"status": "no_album_info_found", "availableInfo": "describe the missing fields and visible candidates"}`
 
     const response = await this.anthropic.messages.create({
       model: "claude-opus-4-8",
@@ -176,7 +173,148 @@ If no clear album information is found, return: {"status": "no_album_info_found"
     return typeof value === "string" && value.trim() !== "" ? value : fallback
   }
 
+  private buildAccessibilityContext(observation: Observation): string {
+    const entries = this.namedEntries(observation)
+    const visibleEntries = entries.filter((entry) => this.isVisibleFrame(entry.frame, observation))
+    const highSignalEntries = visibleEntries.filter((entry) => this.isHighSignalEntry(entry)).slice(0, 120)
+    const dateLikeEntries = visibleEntries
+      .filter((entry) => containsDateLikeText(entry.name))
+      .map((entry) => `${entry.role}: "${entry.name}"`)
+      .slice(0, 40)
+
+    const highSignalText = highSignalEntries.length > 0
+      ? highSignalEntries.map((entry) => this.formatEntry(entry)).join("\n")
+      : "(none)"
+
+    const dateLikeText = unique(dateLikeEntries).join("\n") || "(none)"
+
+    return [
+      "High-signal visible entries:",
+      highSignalText,
+      "",
+      "Visible date-like entries:",
+      dateLikeText,
+    ].join("\n")
+  }
+
+  private namedEntries(observation: Observation): Array<{ role: string; name: string; frame?: Record<string, unknown> }> {
+    const entries: Array<{ role: string; name: string; frame?: Record<string, unknown> }> = []
+
+    for (const element of observation.elements) {
+      if (!element.name) {
+        continue
+      }
+      const frame = this.isRecord(element.metadata?.frame) ? element.metadata.frame : undefined
+      entries.push({
+        role: element.role ?? "unknown",
+        name: element.name,
+        frame,
+      })
+    }
+
+    for (const root of observation.accessibilityTree ?? []) {
+      this.collectNamedAccessibilityEntries(root, entries)
+    }
+
+    const seen = new Set<string>()
+    return entries.filter((entry) => {
+      const frame = entry.frame
+      const key = [
+        entry.role,
+        entry.name,
+        this.isRecord(frame) ? frame.x : "",
+        this.isRecord(frame) ? frame.y : "",
+      ].join("|")
+
+      if (seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+  }
+
+  private collectNamedAccessibilityEntries(
+    node: AccessibilityNode,
+    entries: Array<{ role: string; name: string; frame?: Record<string, unknown> }>,
+  ): void {
+    if (node.name) {
+      entries.push({
+        role: node.role ?? "unknown",
+        name: node.name,
+        frame: node.bounds ? { ...node.bounds } : undefined,
+      })
+    }
+
+    if (!node.children) {
+      return
+    }
+
+    for (const child of node.children) {
+      this.collectNamedAccessibilityEntries(child, entries)
+    }
+  }
+
+  private isHighSignalEntry(entry: { role: string; name: string }): boolean {
+    const role = entry.role.toLowerCase()
+    const name = entry.name.trim()
+
+    if (!name) {
+      return false
+    }
+
+    return (
+      containsDateLikeText(name) ||
+      role.includes("link") ||
+      role.includes("button") ||
+      role.includes("row") ||
+      role.includes("cell") ||
+      role.includes("heading") ||
+      role.includes("statictext")
+    )
+  }
+
+  private formatEntry(entry: { role: string; name: string; frame?: Record<string, unknown> }): string {
+    const frame = entry.frame
+    const position = this.isRecord(frame) && typeof frame.x === "number" && typeof frame.y === "number"
+      ? ` @(${Math.round(frame.x)},${Math.round(frame.y)})`
+      : ""
+
+    return `- ${entry.role}${position}: "${entry.name}"`
+  }
+
+  private isVisibleFrame(frame: Record<string, unknown> | undefined, observation: Observation): boolean {
+    if (!this.isRecord(frame)) {
+      return true
+    }
+
+    const x = typeof frame.x === "number" ? frame.x : 0
+    const y = typeof frame.y === "number" ? frame.y : 0
+    const width = typeof frame.width === "number" ? frame.width : 0
+    const height = typeof frame.height === "number" ? frame.height : 0
+    const screenWidth = observation.coordinateSpace?.screenWidth
+    const screenHeight = observation.coordinateSpace?.screenHeight
+
+    if (width <= 0 || height <= 0) {
+      return false
+    }
+
+    if (typeof screenWidth === "number" && typeof screenHeight === "number") {
+      return x + width > 0 && y + height > 0 && x < screenWidth && y < screenHeight
+    }
+
+    return true
+  }
+
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
   }
+}
+
+function containsDateLikeText(value: string): boolean {
+  return /\b\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?\b/.test(value)
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)]
 }

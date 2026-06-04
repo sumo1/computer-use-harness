@@ -10,6 +10,7 @@ import type {
   MacHelperMethod,
   MacHelperRequest,
   MacHelperResponse,
+  MacDragParams,
   MacKeyParams,
   MacPermissionStatus,
   MacRunningApp,
@@ -88,6 +89,18 @@ export class MacHelperProcessClient implements MacHelperClient {
 
   async click(params: MacActionParams) {
     return this.send<ActionResult>("click", params)
+  }
+
+  async secondaryClick(params: MacActionParams) {
+    return this.send<ActionResult>("secondary-click", params)
+  }
+
+  async hover(params: MacActionParams) {
+    return this.send<ActionResult>("hover", params)
+  }
+
+  async drag(params: MacDragParams) {
+    return this.send<ActionResult>("drag", params)
   }
 
   async typeText(params: MacTypeParams) {

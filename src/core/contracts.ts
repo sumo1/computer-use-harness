@@ -6,7 +6,7 @@ export interface JsonObject {
 
 export type TargetKind = "app" | "browser" | "screen"
 export type AdapterKind = "fake" | "browser-harness" | "mac-helper" | "app-specific"
-export type ActionKind = "observe" | "open" | "click" | "type" | "key" | "scroll" | "policy-check" | "extract"
+export type ActionKind = "observe" | "open" | "click" | "secondary-click" | "hover" | "drag" | "type" | "key" | "scroll" | "policy-check" | "extract"
 export type ActionStatus = "passed" | "failed" | "blocked" | "skipped"
 export type TraceEventKind = "run" | "observation" | "action" | "result" | "policy"
 export type AppSupportLevel = "blocked" | "custom" | "automation" | "generic" | "screen"
@@ -28,6 +28,50 @@ export interface ElementRef {
   metadata?: JsonObject
 }
 
+export interface CoordinateBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface CoordinateSpace {
+  screenWidth: number
+  screenHeight: number
+  scale?: number
+}
+
+export interface Screenshot {
+  format: string
+  data: string
+  width: number
+  height: number
+  timestamp?: string
+}
+
+export interface AccessibilityNode {
+  id: string
+  role: string
+  name?: string
+  value?: string
+  description?: string
+  bounds?: CoordinateBounds
+  children?: AccessibilityNode[]
+  metadata?: JsonObject
+}
+
+export interface WindowMetadata {
+  id: string
+  title: string
+  focused: boolean
+  bounds?: CoordinateBounds
+  appId?: string
+}
+
+export interface PermissionsSnapshot {
+  [key: string]: "granted" | "missing" | "unknown"
+}
+
 export interface Observation {
   id: string
   target: Target
@@ -35,6 +79,14 @@ export interface Observation {
   timestamp: string
   elements: ElementRef[]
   metadata?: JsonObject
+
+  screenshot?: Screenshot
+  accessibilityTree?: AccessibilityNode[]
+  focusedElementId?: string
+  focusedWindow?: WindowMetadata
+  windows?: WindowMetadata[]
+  coordinateSpace?: CoordinateSpace
+  permissions?: PermissionsSnapshot
 }
 
 export interface Action {

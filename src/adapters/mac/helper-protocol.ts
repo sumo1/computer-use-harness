@@ -1,4 +1,4 @@
-import type { Action, ActionResult, JsonObject, Observation, Target } from "../../core/contracts.js"
+import type { Action, ActionResult, JsonObject, Observation, Screenshot, Target } from "../../core/contracts.js"
 import type { ActionErrorCode } from "../../core/errors.js"
 
 export type MacPermissionState = "granted" | "missing" | "unknown"
@@ -17,6 +17,9 @@ export type MacHelperMethod =
   | "screenshot"
   | "open"
   | "click"
+  | "secondary-click"
+  | "hover"
+  | "drag"
   | "type"
   | "key"
   | "scroll"
@@ -83,12 +86,9 @@ export interface MacScrollParams extends MacActionParams {
   amount?: number
 }
 
-export interface MacScreenshot {
-  format: string
-  data: string // base64 encoded
-  width: number
-  height: number
-}
+export type MacDragParams = MacActionParams
+
+export type MacScreenshot = Screenshot
 
 export interface MacHelperClient {
   permissionStatus(): Promise<MacPermissionStatus>
@@ -98,6 +98,9 @@ export interface MacHelperClient {
   screenshot(target: Target): Promise<MacScreenshot>
   open(params: MacActionParams): Promise<ActionResult>
   click(params: MacActionParams): Promise<ActionResult>
+  secondaryClick(params: MacActionParams): Promise<ActionResult>
+  hover(params: MacActionParams): Promise<ActionResult>
+  drag(params: MacDragParams): Promise<ActionResult>
   typeText(params: MacTypeParams): Promise<ActionResult>
   key(params: MacKeyParams): Promise<ActionResult>
   scroll(params: MacScrollParams): Promise<ActionResult>

@@ -5,6 +5,7 @@ import { DialogHandlerCapability } from "./dialog-handler.js"
 import { FirstResultClicker } from "./first-result-clicker.js"
 import { NavigationVerifierCapability } from "./navigation-verifier.js"
 import { ScreenshotVisionCapability } from "./screenshot-vision.js"
+import { ScreenshotTargetLocator } from "./screenshot-target-locator.js"
 import { TextInputHandler } from "./text-input-handler.js"
 import { WaitForStateCapability } from "./wait-for-state.js"
 import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
@@ -21,6 +22,7 @@ export function createDefaultCapabilityChain(apiKey?: string, helper?: MacHelper
     new ScreenshotVisionCapability(apiKey, helper),  // Extract: vision-based with screenshots
     new TextInputHandler(),                          // Type: search inputs
     new AXElementFinder(),                           // Click/Type: AX tree with keyword
+    new ScreenshotTargetLocator(apiKey, helper),     // Click: visible painted UI fallback
     new FirstResultClicker(),                        // Click: first clickable result (fallback)
     new CoordinateClicker(),                         // Click: fixed coordinates (last resort)
   ])
@@ -33,6 +35,7 @@ export { DialogHandlerCapability } from "./dialog-handler.js"
 export { FirstResultClicker } from "./first-result-clicker.js"
 export { NavigationVerifierCapability } from "./navigation-verifier.js"
 export { ScreenshotVisionCapability } from "./screenshot-vision.js"
+export { ScreenshotTargetLocator } from "./screenshot-target-locator.js"
 export { TextInputHandler } from "./text-input-handler.js"
 export { WaitForStateCapability } from "./wait-for-state.js"
 export type { Capability, CapabilityResult, SemanticHints } from "./capability.js"

@@ -9,7 +9,7 @@ export class AXElementFinder implements Capability {
   readonly name = "ax-element-finder"
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
-    if (action.kind !== "click" && action.kind !== "type") {
+    if (!canUseElementTarget(action.kind)) {
       return false
     }
 
@@ -20,7 +20,7 @@ export class AXElementFinder implements Capability {
 
     // Check if we can find element by keyword
     const keyword = stringInput(action, "keyword", "")
-    if (keyword && this.findByKeyword(observation.elements, keyword)) {
+    if (keyword && this.findByKeyword(observation.elements, keyword, action)) {
       return true
     }
 
@@ -53,7 +53,7 @@ export class AXElementFinder implements Capability {
     // Try keyword-based finding
     const keyword = stringInput(action, "keyword", "")
     if (keyword) {
-      const element = this.findByKeyword(observation.elements, keyword)
+      const element = this.findByKeyword(observation.elements, keyword, action)
       if (element) {
         return {
           success: true,
@@ -85,15 +85,14 @@ export class AXElementFinder implements Capability {
     }
   }
 
-  private findByKeyword(elements: ElementRef[], keyword: string): ElementRef | undefined {
+  private findByKeyword(elements: ElementRef[], keyword: string, action: Action): ElementRef | undefined {
     const normalizedKeyword = normalize(keyword)
     if (!normalizedKeyword) {
       return undefined
     }
 
-    const candidates = this.visibleNonMenuElements(elements).filter((element) =>
-      normalize(element.name).includes(normalizedKeyword),
-    )
+    const visibleCandidates = this.visibleNonMenuElements(elements)
+    const candidates = this.rankCandidates(visibleCandidates, normalizedKeyword, action)
 
     return (
       candidates.find((element) => this.isPressableRole(normalize(element.role))) ??
@@ -141,6 +140,26 @@ export class AXElementFinder implements Capability {
     return role.includes("button") || role.includes("row") || role.includes("cell") || role.includes("link")
   }
 
+  private rankCandidates(elements: ElementRef[], keyword: string, action: Action): ElementRef[] {
+    const namedTab = normalize(stringInput(action, "description", "")).includes("click tab named")
+    const exact = elements.filter((element) => normalize(element.name) === keyword)
+    if (exact.length > 0) {
+      return exact
+    }
+
+    const tabLike = namedTab
+      ? elements.filter((element) => {
+          const name = normalize(element.name)
+          return name.startsWith(keyword) && !name.endsWith("信息")
+        })
+      : []
+    if (tabLike.length > 0) {
+      return tabLike
+    }
+
+    return elements.filter((element) => normalize(element.name).includes(keyword))
+  }
+
   private getActionKey(action: Action): string {
     const description = stringInput(action, "description", "")
     return normalize(description)
@@ -158,4 +177,8 @@ function normalize(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function canUseElementTarget(kind: Action["kind"]): boolean {
+  return kind === "click" || kind === "secondary-click" || kind === "hover" || kind === "drag" || kind === "type"
 }
