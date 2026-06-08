@@ -5,6 +5,7 @@ export interface UseCase {
   title: string
   target?: UseCaseTarget
   requires?: UseCaseRequirements
+  goal?: UseCaseGoal
   steps: string[]
   success: string[]
 }
@@ -22,6 +23,36 @@ export interface UseCaseRequirements {
   services?: string[]
 }
 
+export interface UseCaseGoal {
+  mode: "target"
+  entity: string
+  query: string
+  constraints?: Record<string, string>
+  navigation?: UseCaseGoalNavigation
+  coverage?: UseCaseGoalCoverage
+  orderBy?: UseCaseGoalOrder
+  requiredFields: string[]
+  confirmation?: "list" | "detail"
+  maxIterations?: number
+}
+
+export interface UseCaseGoalNavigation {
+  semanticTabs?: string[]
+}
+
+export interface UseCaseGoalCoverage {
+  strategy: "visible" | "scroll-until-stable"
+  maxScans?: number
+  maxScrolls?: number
+  stableObservations?: number
+  minObservations?: number
+}
+
+export interface UseCaseGoalOrder {
+  field: string
+  direction: "asc" | "desc"
+}
+
 export interface UseCaseListItem {
   id: string
   title: string
@@ -33,6 +64,7 @@ export interface UseCaseDryRunItem {
   title: string
   target?: UseCaseTarget
   requires: UseCaseRequirements
+  goal?: UseCaseGoal
   steps: string[]
   success: string[]
 }

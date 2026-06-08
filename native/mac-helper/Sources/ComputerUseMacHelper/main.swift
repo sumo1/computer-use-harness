@@ -1,12 +1,20 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import Vision
 
 private let maxAXDepth = 8
 private let maxAXElements = 350
+private let maxOCRElements = 160
 
 private final class OpenErrorBox: @unchecked Sendable {
     var error: Error?
+}
+
+private struct CapturedAppScreenshot {
+    let image: CGImage
+    let windowBounds: CGRect
+    let payload: [String: Any]
 }
 
 runStdioLoop()
@@ -169,13 +177,24 @@ private func listWindows(params: [String: Any]) -> [[String: Any]] {
 private func appState(params: [String: Any]) -> [String: Any] {
     let target = readTarget(params: params)
     let windows = listWindows(params: params)
-    let elements = collectAXElements(target: target)
+    var elements = collectAXElements(target: target)
 
     let permissions: [String: String] = [
         "accessibility": AXIsProcessTrusted() ? "granted" : "missing",
         "screenRecording": CGPreflightScreenCaptureAccess() ? "granted" : "missing",
         "inputMonitoring": "unknown",
     ]
+
+    var screenshotPayload: [String: Any]?
+    var ocrElementCount = 0
+    if permissions["screenRecording"] == "granted",
+       let screenshot = captureAppScreenshot(target: target) {
+        screenshotPayload = screenshot.payload
+
+        let ocrElements = collectScreenshotTextElements(target: target, screenshot: screenshot)
+        ocrElementCount = ocrElements.count
+        elements.append(contentsOf: ocrElements)
+    }
 
     var observation: [String: Any] = [
         "id": "\(target["id"] as? String ?? "target"):observation:mac-helper",
@@ -187,12 +206,13 @@ private func appState(params: [String: Any]) -> [String: Any] {
             "helperMethod": "getAppState",
             "windowCount": windows.count,
             "elementCount": elements.count,
+            "ocrElementCount": ocrElementCount,
             "accessibility": permissions["accessibility"] ?? "unknown",
         ],
     ]
 
-    if permissions["screenRecording"] == "granted", let screenshot = captureAppScreenshot(target: target) {
-        observation["screenshot"] = screenshot
+    if let screenshotPayload {
+        observation["screenshot"] = screenshotPayload
     }
 
     if !elements.isEmpty {
@@ -349,7 +369,7 @@ private func collectAXElements(target: [String: Any]) -> [[String: Any]] {
     return elements
 }
 
-private func captureAppScreenshot(target: [String: Any]) -> [String: Any]? {
+private func captureAppScreenshot(target: [String: Any]) -> CapturedAppScreenshot? {
     guard let app = findRunningApp(target: target) else {
         return nil
     }
@@ -367,6 +387,7 @@ private func captureAppScreenshot(target: [String: Any]) -> [String: Any]? {
           let windowNumber = mainWindow[kCGWindowNumber as String] as? CGWindowID else {
         return nil
     }
+    let windowBounds = cgWindowBounds(mainWindow)
 
     guard let cgImage = CGWindowListCreateImage(
         .null,
@@ -382,13 +403,105 @@ private func captureAppScreenshot(target: [String: Any]) -> [String: Any]? {
         return nil
     }
 
-    return [
+    let payload: [String: Any] = [
         "format": "png",
         "data": pngData.base64EncodedString(),
         "width": cgImage.width,
         "height": cgImage.height,
         "timestamp": timestamp(),
+        "windowBounds": rectDictionary(windowBounds),
     ]
+
+    return CapturedAppScreenshot(
+        image: cgImage,
+        windowBounds: windowBounds,
+        payload: payload
+    )
+}
+
+private func cgWindowBounds(_ window: [String: Any]) -> CGRect {
+    guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+          let x = numberDouble(bounds["X"]),
+          let y = numberDouble(bounds["Y"]),
+          let width = numberDouble(bounds["Width"]),
+          let height = numberDouble(bounds["Height"])
+    else {
+        return .zero
+    }
+
+    return CGRect(x: x, y: y, width: width, height: height)
+}
+
+private func rectDictionary(_ rect: CGRect) -> [String: Any] {
+    return [
+        "x": rect.origin.x,
+        "y": rect.origin.y,
+        "width": rect.size.width,
+        "height": rect.size.height,
+    ]
+}
+
+private func collectScreenshotTextElements(
+    target: [String: Any],
+    screenshot: CapturedAppScreenshot
+) -> [[String: Any]] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = false
+    request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+
+    let handler = VNImageRequestHandler(cgImage: screenshot.image, options: [:])
+    do {
+        try handler.perform([request])
+    } catch {
+        return []
+    }
+
+    return (request.results ?? [])
+        .prefix(maxOCRElements)
+        .enumerated()
+        .compactMap { index, observation in
+            guard let candidate = observation.topCandidates(1).first else {
+                return nil
+            }
+
+            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return nil
+            }
+
+            return [
+                "id": "ocr:\(index)",
+                "source": "mac-helper",
+                "target": target,
+                "role": "OCRText",
+                "name": text,
+                "metadata": [
+                    "source": "screenshot-ocr",
+                    "synthetic": true,
+                    "confidence": Double(candidate.confidence),
+                    "frame": rectDictionary(
+                        denormalizedVisionFrame(
+                            observation.boundingBox,
+                            windowBounds: screenshot.windowBounds
+                        )
+                    ),
+                ],
+            ]
+        }
+}
+
+private func denormalizedVisionFrame(_ boundingBox: CGRect, windowBounds: CGRect) -> CGRect {
+    if windowBounds.width <= 0 || windowBounds.height <= 0 {
+        return .zero
+    }
+
+    return CGRect(
+        x: windowBounds.minX + boundingBox.minX * windowBounds.width,
+        y: windowBounds.minY + (1 - boundingBox.maxY) * windowBounds.height,
+        width: boundingBox.width * windowBounds.width,
+        height: boundingBox.height * windowBounds.height
+    )
 }
 
 private struct AccessibilityTreeEntry {
@@ -707,6 +820,30 @@ private func performClick(action: [String: Any], actionId: String, method: Strin
     }
 
     guard let element = resolveActionElement(action, expectedPid: app.processIdentifier) else {
+        if let point = actionElementFrameCenter(action) {
+            activateTargetApp(app)
+
+            if postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) {
+                return passedActionResult(
+                    actionId: actionId,
+                    method: method,
+                    metadata: [
+                        "inputMethod": "verified-hid-synthetic-element-frame",
+                        "x": point.x,
+                        "y": point.y,
+                    ]
+                )
+            }
+
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "ACTION_FAILED",
+                message: "Refusing synthetic element click because target app is not the front layer-zero window at that point.",
+                details: ["x": point.x, "y": point.y]
+            )
+        }
+
         return failedActionResult(
             actionId: actionId,
             method: method,
@@ -847,7 +984,9 @@ private func performDrag(action: [String: Any], actionId: String, method: String
         )
     }
 
-    guard let start = actionPoint(action) ?? actionElementCenter(action, expectedPid: app.processIdentifier),
+    guard let start = actionPoint(action)
+            ?? actionElementCenter(action, expectedPid: app.processIdentifier)
+            ?? actionElementFrameCenter(action),
           let end = dragEndPoint(action, start: start)
     else {
         return failedActionResult(
@@ -2390,6 +2529,23 @@ private func actionElementCenter(_ action: [String: Any], expectedPid: pid_t) ->
     }
 
     return axElementCenter(element)
+}
+
+private func actionElementFrameCenter(_ action: [String: Any]) -> CGPoint? {
+    guard let element = action["element"] as? [String: Any],
+          let metadata = element["metadata"] as? [String: Any],
+          let frame = metadata["frame"] as? [String: Any],
+          let x = numberDouble(frame["x"]),
+          let y = numberDouble(frame["y"]),
+          let width = numberDouble(frame["width"]),
+          let height = numberDouble(frame["height"]),
+          width > 0,
+          height > 0
+    else {
+        return nil
+    }
+
+    return CGPoint(x: x + width / 2, y: y + height / 2)
 }
 
 private func dragEndPoint(_ action: [String: Any], start: CGPoint) -> CGPoint? {

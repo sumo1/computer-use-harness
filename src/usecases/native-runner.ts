@@ -19,6 +19,14 @@ import { evaluatePolicy } from "../runtime/policy.js"
 import { appendTraceEvent, createUseCaseAction, createUseCaseTarget } from "./action-plan.js"
 import { measureActionCall, observeAction, observeAfterAction } from "./action-verification.js"
 import { extractionRecoveryCandidates } from "./recovery-plan.js"
+import {
+  type TargetModeLoopAdvance,
+  type TargetModeLoopState,
+  advanceTargetModeLoop,
+  createTargetModeLoopState,
+  targetModeLoopInitialSteps,
+} from "./target-loop.js"
+import type { TargetModePlannedStep } from "./target-mode.js"
 import type { UseCase, UseCaseRunResult, UseCaseStepResult } from "./types.js"
 
 export interface NativeUseCaseRunnerOptions {
@@ -29,6 +37,8 @@ interface QueuedUseCaseStep {
   description: string
   adaptive?: boolean
   originalExtractDescription?: string
+  element?: Action["element"]
+  input?: JsonObject
 }
 
 interface AdaptiveRunState {
@@ -60,13 +70,16 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   const runStartedAt = Date.now()
   const trace: TraceEvent[] = []
   const steps: UseCaseStepResult[] = []
-  const pendingSteps: QueuedUseCaseStep[] = useCase.steps.map((description) => ({ description }))
+  const pendingSteps: QueuedUseCaseStep[] = useCase.goal
+    ? targetModeLoopInitialSteps(useCase.goal).map(toQueuedUseCaseStep)
+    : useCase.steps.map((description) => ({ description }))
   const adaptiveState: AdaptiveRunState = {
     extractRetryCounts: new Map(),
     triedTargets: new Set(),
     triedNavigationDescriptions: new Set(),
     clickRecoveryCounts: new Map(),
   }
+  const targetModeState = useCase.goal ? createTargetModeLoopState() : undefined
   let currentObservation: Observation | undefined
   let firstActionRecorded = false
   let firstStateRecorded = false
@@ -133,6 +146,21 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
           ...(queuedStep.originalExtractDescription
             ? { originalExtractDescription: queuedStep.originalExtractDescription }
             : {}),
+        },
+      }
+    }
+    if (queuedStep.element) {
+      plannedAction = {
+        ...plannedAction,
+        element: queuedStep.element,
+      }
+    }
+    if (queuedStep.input) {
+      plannedAction = {
+        ...plannedAction,
+        input: {
+          ...plannedAction.input,
+          ...queuedStep.input,
         },
       }
     }
@@ -268,6 +296,53 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
 
     rememberNavigationAttempt(action, adaptiveState)
 
+    const hasFreshObservation = Boolean(execution.observation)
+    const canUseCurrentObservationForTargetMode =
+      result.status !== "failed" || hasFreshObservation || action.kind === "extract"
+
+    if (
+      useCase.goal &&
+      targetModeState &&
+      currentObservation &&
+      canUseCurrentObservationForTargetMode
+    ) {
+      const targetModeFollowUp = await planTargetModeFollowUp(
+        useCase.goal,
+        action,
+        currentObservation,
+        targetModeState,
+        result,
+        pendingSteps.length,
+      )
+
+      if (targetModeFollowUp) {
+        appendTraceEvent(trace, {
+          traceId,
+          kind: "decision",
+          target,
+          action,
+          observation: currentObservation,
+          result,
+          metadata: targetModeDecisionMetadata(targetModeFollowUp),
+        })
+
+        if (targetModeFollowUp.step) {
+          pendingSteps.unshift(toQueuedUseCaseStep(targetModeFollowUp.step))
+          continue
+        }
+      }
+    }
+
+    if (useCase.goal) {
+      steps.push({
+        index: stepIndex,
+        description,
+        status: result.status,
+        adapter: "mac-helper",
+      })
+      continue
+    }
+
     if (canRetryPointClick(action, result, adaptiveState)) {
       adaptiveState.clickRecoveryCounts.set(
         description,
@@ -329,12 +404,84 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   return {
     caseId: useCase.id,
     title: useCase.title,
-    status: runStatus(steps),
+    status: finalRunStatus(useCase, steps, trace),
     mode: "native",
     traceId,
     trace,
     steps,
     success: useCase.success,
+  }
+}
+
+function toQueuedUseCaseStep(step: TargetModePlannedStep): QueuedUseCaseStep {
+  return {
+    description: step.description,
+    adaptive: true,
+    element: step.element,
+    input: step.input,
+  }
+}
+
+async function planTargetModeFollowUp(
+  goal: NonNullable<UseCase["goal"]>,
+  action: Action,
+  observation: Observation,
+  state: TargetModeLoopState,
+  result: ActionResult,
+  pendingStepCount: number,
+): Promise<TargetModeLoopAdvance | undefined> {
+  if (action.kind === "extract" && action.input?.targetModePhase === "complete") {
+    return undefined
+  }
+  if (action.kind === "extract" && action.input?.targetModePhase === "failed") {
+    return undefined
+  }
+
+  const hasPendingSteps = pendingStepCount > 0
+  if (hasPendingSteps && result.status !== "failed") {
+    return undefined
+  }
+
+  const followUp = await advanceTargetModeLoop(goal, action, result, observation, state)
+  if (!followUp.step) {
+    return followUp
+  }
+  if (hasPendingSteps && !canPreemptPendingTargetModeStep(followUp.step)) {
+    return undefined
+  }
+
+  return followUp
+}
+
+function canPreemptPendingTargetModeStep(step: TargetModePlannedStep): boolean {
+  return false
+}
+
+function targetModeDecisionMetadata(followUp: TargetModeLoopAdvance): JsonObject {
+  return {
+    targetMode: true,
+    targetModeLoop: true,
+    status: followUp.decision.status,
+    reason: followUp.decision.reason,
+    evidence: followUp.decision.evidence.map((candidate) => ({
+      key: candidate.key,
+      source: candidate.source,
+      confidence: candidate.confidence,
+      missingFields: candidate.missingFields,
+      fields: candidate.fields,
+      ...(candidate.title ? { title: candidate.title } : {}),
+      ...(candidate.artist ? { artist: candidate.artist } : {}),
+      ...(candidate.releaseDate ? { releaseDate: candidate.releaseDate } : {}),
+    })),
+    ...(followUp.step
+      ? {
+          nextAction: {
+            description: followUp.step.description,
+            phase: followUp.step.input?.targetModePhase ?? null,
+            intent: followUp.step.input?.targetModeIntent ?? null,
+          },
+        }
+      : {}),
   }
 }
 
@@ -360,6 +507,13 @@ function requiresObservationBeforeAction(action: Action): boolean {
 }
 
 function canBindActionWithCapabilities(action: Action): boolean {
+  if (
+    action.kind === "extract" &&
+    (hasPrecomputedExtraction(action) || isTerminalTargetModeExtract(action))
+  ) {
+    return false
+  }
+
   return (
     action.kind === "click" ||
     action.kind === "secondary-click" ||
@@ -369,6 +523,106 @@ function canBindActionWithCapabilities(action: Action): boolean {
     action.kind === "key" ||
     action.kind === "extract"
   )
+}
+
+function hasPrecomputedExtraction(action: Action): boolean {
+  return typeof action.input?.extractedData === "string" && action.input.extractedData.trim() !== ""
+}
+
+function isTerminalTargetModeExtract(action: Action): boolean {
+  return action.input?.targetModePhase === "failed" || action.input?.targetModeTerminal === true
+}
+
+function finalRunStatus(
+  useCase: UseCase,
+  steps: UseCaseStepResult[],
+  trace: TraceEvent[],
+): UseCaseRunResult["status"] {
+  const status = runStatus(steps)
+  if (!useCase.goal) {
+    return status
+  }
+
+  if (status === "blocked" || status === "skipped") {
+    return status
+  }
+
+  return hasTargetModeEndToEndCompletion(useCase.goal, trace) ? "passed" : "failed"
+}
+
+function hasTargetModeEndToEndCompletion(
+  goal: NonNullable<UseCase["goal"]>,
+  trace: TraceEvent[],
+): boolean {
+  return trace.some((event) => {
+    const action = event.action
+    const result = event.result
+    if (
+      event.kind !== "result" ||
+      action?.kind !== "extract" ||
+      action.input?.targetModePhase !== "complete" ||
+      result?.status !== "passed"
+    ) {
+      return false
+    }
+
+    const payload = parseExtractionPayload(result.metadata?.extractedData)
+    if (
+      !payload ||
+      missingRequiredFields(payload, { requiredFields: goal.requiredFields }).length > 0
+    ) {
+      return false
+    }
+
+    const confirmationSatisfied =
+      goal.confirmation === "detail" ? hasDetailSourceEvidence(payload) : true
+
+    return confirmationSatisfied && hasRequiredCoverageEvidence(goal, payload)
+  })
+}
+
+function parseExtractionPayload(value: unknown): JsonObject | undefined {
+  if (typeof value !== "string" || value.trim() === "") {
+    return undefined
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return isJsonObject(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function hasDetailSourceEvidence(payload: JsonObject): boolean {
+  const sourceEvidence = payload.sourceEvidence
+  return typeof sourceEvidence === "string" && sourceEvidence.includes("source=detail")
+}
+
+function hasRequiredCoverageEvidence(
+  goal: NonNullable<UseCase["goal"]>,
+  payload: JsonObject,
+): boolean {
+  if (!goal.orderBy || goal.coverage?.strategy !== "scroll-until-stable") {
+    return true
+  }
+
+  const coverage = payload.coverageEvidence
+  if (!isJsonObject(coverage)) {
+    return false
+  }
+
+  return (
+    coverage.strategy === "scroll-until-stable" &&
+    coverage.status === "satisfied" &&
+    isSatisfiedCoverageStopReason(coverage.stopReason) &&
+    typeof coverage.observedScanAttempts === "number" &&
+    coverage.observedScanAttempts > 0
+  )
+}
+
+function isSatisfiedCoverageStopReason(value: JsonValue | undefined): boolean {
+  return value === "stable-after-change" || value === "end-of-list"
 }
 
 function canContinueAfterExtractFailure(action: Action, result: ActionResult): boolean {
@@ -586,7 +840,7 @@ function updateLastSearchQuery(
   result: ActionResult,
   previous: string | undefined,
 ): string | undefined {
-  if (!result.ok || action.kind !== "type") {
+  if (action.kind !== "type") {
     return previous
   }
 

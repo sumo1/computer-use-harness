@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import YAML from "yaml"
 import type { TargetKind } from "../core/contracts.js"
-import type { UseCase, UseCaseDryRunItem, UseCaseListItem } from "./types.js"
+import type { UseCase, UseCaseDryRunItem, UseCaseGoal, UseCaseListItem } from "./types.js"
 
 const DEFAULT_USECASE_PATH = "usecases/cases.yaml"
 
@@ -31,6 +31,7 @@ export function toDryRunItem(useCase: UseCase): UseCaseDryRunItem {
     title: useCase.title,
     target: useCase.target,
     requires: useCase.requires ?? {},
+    goal: useCase.goal,
     steps: useCase.steps,
     success: useCase.success,
   }
@@ -44,11 +45,140 @@ function validateUseCase(raw: unknown): UseCase {
   const id = readString(raw, "id")
   const title = readString(raw, "title")
   const target = readTarget(raw.target)
+  const goal = readGoal(raw.goal)
   const steps = readStringArray(raw, "steps")
   const success = readStringArray(raw, "success")
   const requires = readRequirements(raw.requires)
 
-  return { id, title, target, requires, steps, success }
+  return { id, title, target, requires, goal, steps, success }
+}
+
+function readGoal(raw: unknown): UseCaseGoal | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    throw new Error("goal must be an object when provided")
+  }
+
+  const mode = readString(raw, "mode")
+  if (mode !== "target") {
+    throw new Error("goal.mode must be target")
+  }
+
+  const entity = readString(raw, "entity")
+  const query = readString(raw, "query")
+  const constraints = readStringMap(raw.constraints, "goal.constraints")
+  const navigation = readGoalNavigation(raw.navigation)
+  const coverage = readGoalCoverage(raw.coverage)
+  const orderBy = readGoalOrder(raw.orderBy)
+  const requiredFields = readStringArray(raw, "requiredFields")
+  const confirmation = readConfirmation(optionalString(raw.confirmation))
+  const maxIterations = readPositiveInteger(raw.maxIterations, "goal.maxIterations")
+
+  return {
+    mode,
+    entity,
+    query,
+    constraints,
+    navigation,
+    coverage,
+    orderBy,
+    requiredFields,
+    confirmation,
+    maxIterations,
+  }
+}
+
+function readGoalNavigation(raw: unknown): UseCaseGoal["navigation"] {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    throw new Error("goal.navigation must be an object when provided")
+  }
+
+  return {
+    semanticTabs: optionalStringArray(raw.semanticTabs),
+  }
+}
+
+function readGoalCoverage(raw: unknown): UseCaseGoal["coverage"] {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    throw new Error("goal.coverage must be an object when provided")
+  }
+
+  const strategy = readString(raw, "strategy")
+  if (strategy !== "visible" && strategy !== "scroll-until-stable") {
+    throw new Error("goal.coverage.strategy must be visible or scroll-until-stable")
+  }
+
+  return {
+    strategy,
+    maxScans: readPositiveInteger(raw.maxScans, "goal.coverage.maxScans"),
+    maxScrolls: readPositiveInteger(raw.maxScrolls, "goal.coverage.maxScrolls"),
+    stableObservations: readPositiveInteger(
+      raw.stableObservations,
+      "goal.coverage.stableObservations",
+    ),
+    minObservations: readPositiveInteger(raw.minObservations, "goal.coverage.minObservations"),
+  }
+}
+
+function readGoalOrder(raw: unknown): UseCaseGoal["orderBy"] {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    throw new Error("goal.orderBy must be an object when provided")
+  }
+
+  const field = readString(raw, "field")
+  const direction = readString(raw, "direction")
+  if (direction !== "asc" && direction !== "desc") {
+    throw new Error("goal.orderBy.direction must be asc or desc")
+  }
+
+  return { field, direction }
+}
+
+function readStringMap(raw: unknown, fieldName: string): Record<string, string> | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    throw new Error(`${fieldName} must be an object when provided`)
+  }
+
+  const entries = Object.entries(raw)
+  if (entries.some(([, value]) => typeof value !== "string")) {
+    throw new Error(`${fieldName} values must be strings`)
+  }
+
+  return Object.fromEntries(entries) as Record<string, string>
+}
+
+function readConfirmation(value: string | undefined): UseCaseGoal["confirmation"] {
+  if (value === undefined) {
+    return undefined
+  }
+  if (value !== "list" && value !== "detail") {
+    throw new Error("goal.confirmation must be list or detail")
+  }
+  return value
+}
+
+function readPositiveInteger(value: unknown, fieldName: string): number | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`)
+  }
+  return value
 }
 
 function readTarget(raw: unknown) {

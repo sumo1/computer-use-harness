@@ -11,7 +11,7 @@ import {
   CoordinateClicker,
 } from "../dist/capabilities/index.js"
 import { createUseCaseAction } from "../dist/usecases/action-plan.js"
-import { observeAction } from "../dist/usecases/action-verification.js"
+import { observeAction, observeAfterAction } from "../dist/usecases/action-verification.js"
 import { extractionRecoveryCandidates } from "../dist/usecases/recovery-plan.js"
 
 const target = {
@@ -105,6 +105,43 @@ const staleSearchResult = await observeAction(
 )
 assert.equal(staleSearchResult.result.status, "failed")
 
+const failedTypeAction = createUseCaseAction(
+  "LOOP",
+  5,
+  "type 周杰伦 into search input",
+  target,
+  "mac-helper",
+)
+const observedFailedTypeResult = await observeAfterAction(
+  fakeObserveHelper(searchResultsObservation()),
+  failedTypeAction,
+  {
+    value: {
+      actionId: failedTypeAction.id,
+      ok: false,
+      status: "failed",
+      adapter: "mac-helper",
+      error: {
+        code: "ACTION_FAILED",
+        message: "Unable to paste text into search element.",
+      },
+    },
+    latencyMs: 1,
+    attempts: 1,
+  },
+  "type",
+  staleSearchObservation(),
+)
+assert.equal(observedFailedTypeResult.result.status, "failed")
+assert.equal(
+  observedFailedTypeResult.observation?.elements?.some((element) => element.name === "周杰伦"),
+  true,
+)
+assert.equal(
+  observedFailedTypeResult.result.metadata?.verification,
+  "post-action-observe-after-failed-action",
+)
+
 const staleRecovery = extractionRecoveryCandidates(
   "wait for search results to load",
   staleSearchObservation(),
@@ -144,18 +181,33 @@ assert.equal(cliRun.status, 0, cliRun.stderr || cliRun.stdout)
 const cliResult = JSON.parse(cliRun.stdout)
 assert.equal(cliResult.ok, true)
 assert.equal(cliResult.data.status, "passed")
-assert(cliResult.data.steps.at(-1)?.description.includes("extract latest"))
+assert(cliResult.data.steps.at(-1)?.description.includes("extract target goal result"))
+assertTargetLoopMetadata(cliResult.data.trace)
 
 const extractResult = cliResult.data.trace
   .filter((event) => event.kind === "result")
   .map((event) => event.result)
   .find((result) => result?.metadata?.helperMethod === "extract")
 
-assert.deepEqual(JSON.parse(extractResult.metadata.extractedData), {
-  albumName: "太阳之子",
-  releaseDate: "2026-03-25",
-  artist: "周杰伦",
-})
+const extractedData = JSON.parse(extractResult.metadata.extractedData)
+assert.equal(extractedData.albumName, "太阳之子")
+assert.equal(extractedData.releaseDate, "2026-03-25")
+assert.equal(extractedData.artist, "周杰伦")
+assert.equal(extractedData.sourceEvidence.includes("source=detail"), true)
+assert.equal(extractedData.coverageEvidence.status, "satisfied")
+assert.equal(extractedData.coverageEvidence.observedScanAttempts, 2)
+assert.equal(extractedData.coverageEvidence.viewportChanged, true)
+assert.equal(extractedData.coverageEvidence.stopReason, "stable-after-change")
+
+const coverageScans = cliResult.data.trace.filter(
+  (event) => event.kind === "action" && event.action?.input?.targetModePhase === "scan-results",
+)
+assert.deepEqual(
+  coverageScans.map((event) => event.action.input.description),
+  ["scroll down 5 for result coverage 1", "scroll down 5 for result coverage 2"],
+)
+assert.equal(coverageScans[0]?.action.input.targetModeIntent.kind, "scroll")
+assert.equal(coverageScans[0]?.action.input.targetModeIntent.expect.viewportChange, true)
 
 assert(
   cliResult.data.trace.some(
@@ -164,6 +216,110 @@ assert(
       event.observation?.elements?.some((element) => element.name === "专辑"),
   ),
 )
+assert(
+  cliResult.data.trace.some(
+    (event) =>
+      event.kind === "action" &&
+      event.action?.kind === "click" &&
+      event.action?.input?.description === "click item named 太阳之子",
+  ),
+)
+const detailClick = cliResult.data.trace.find(
+  (event) =>
+    event.kind === "action" &&
+    event.action?.kind === "click" &&
+    event.action?.input?.description === "click item named 太阳之子",
+)
+assert.equal(detailClick.action.input.targetModeIntent.kind, "click")
+assert.equal(detailClick.action.input.targetModeIntent.expect.detailEvidence, true)
+assert.equal(detailClick.action.input.targetModeVerifiedOutcome.actionKind, "scroll")
+assert(
+  !cliResult.data.trace.some(
+    (event) =>
+      event.kind === "action" &&
+      event.action?.kind === "click" &&
+      event.action?.input?.description === "click item named 添加新歌单",
+  ),
+)
+
+const stuckScrollHelperPath = writeLoopHelper("stuck-scroll")
+const stuckScrollCliRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "usecases",
+    "run",
+    "UC-102",
+    "--mac-helper",
+    stuckScrollHelperPath,
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(stuckScrollCliRun.status, 0, stuckScrollCliRun.stderr || stuckScrollCliRun.stdout)
+
+const stuckScrollCliResult = JSON.parse(stuckScrollCliRun.stdout)
+assert.equal(stuckScrollCliResult.ok, true)
+assert.equal(stuckScrollCliResult.data.status, "passed")
+
+const stuckScrollScans = stuckScrollCliResult.data.trace.filter(
+  (event) => event.kind === "action" && event.action?.input?.targetModePhase === "scan-results",
+)
+assert.deepEqual(
+  stuckScrollScans.map((event) => event.action.input.description),
+  [
+    "scroll down 5 for result coverage 1",
+    "drag by 0, -420 for result coverage 2",
+    "scroll down 5 for result coverage 3",
+  ],
+)
+
+const loadingAfterDragHelperPath = writeLoopHelper("loading-after-drag")
+const loadingAfterDragCliRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "usecases",
+    "run",
+    "UC-102",
+    "--mac-helper",
+    loadingAfterDragHelperPath,
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(
+  loadingAfterDragCliRun.status,
+  0,
+  loadingAfterDragCliRun.stderr || loadingAfterDragCliRun.stdout,
+)
+
+const loadingAfterDragCliResult = JSON.parse(loadingAfterDragCliRun.stdout)
+assert.equal(loadingAfterDragCliResult.ok, true)
+assert.equal(loadingAfterDragCliResult.data.status, "passed")
+const loadingAfterDragResult = loadingAfterDragCliResult.data.trace.find(
+  (event) =>
+    event.kind === "result" &&
+    event.action?.input?.description === "drag by 0, -420 for result coverage 2",
+)
+assert.equal(loadingAfterDragResult?.result?.metadata?.settleRequired, true)
+assert(loadingAfterDragResult?.result?.metadata?.settleAttempts > 0)
 
 const stalledHelperPath = writeLoopHelper("stalled-tab")
 const stalledCliRun = spawnSync(
@@ -190,11 +346,54 @@ const stalledExtractResult = stalledCliResult.data.trace
   .map((event) => event.result)
   .find((result) => result?.metadata?.helperMethod === "extract" && result.ok)
 
-assert.deepEqual(JSON.parse(stalledExtractResult.metadata.extractedData), {
-  albumName: "太阳之子",
-  releaseDate: "2026-03-25",
-  artist: "周杰伦",
-})
+const stalledExtractedData = JSON.parse(stalledExtractResult.metadata.extractedData)
+assert.equal(stalledExtractedData.albumName, "太阳之子")
+assert.equal(stalledExtractedData.releaseDate, "2026-03-25")
+assert.equal(stalledExtractedData.artist, "周杰伦")
+assert.equal(stalledExtractedData.sourceEvidence.includes("source=detail"), true)
+assert.equal(stalledExtractedData.coverageEvidence.status, "satisfied")
+assert.equal(stalledExtractedData.coverageEvidence.observedScanAttempts, 2)
+assert.equal(stalledExtractedData.coverageEvidence.viewportChanged, true)
+assert.equal(stalledExtractedData.coverageEvidence.stopReason, "stable-after-change")
+
+const unstableUntilMaxHelperPath = writeLoopHelper("unstable-until-max")
+const unstableUntilMaxCliRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "usecases",
+    "run",
+    "UC-102",
+    "--mac-helper",
+    unstableUntilMaxHelperPath,
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(
+  unstableUntilMaxCliRun.status,
+  0,
+  unstableUntilMaxCliRun.stderr || unstableUntilMaxCliRun.stdout,
+)
+
+const unstableUntilMaxCliResult = JSON.parse(unstableUntilMaxCliRun.stdout)
+assert.equal(unstableUntilMaxCliResult.ok, true)
+assert.equal(unstableUntilMaxCliResult.data.status, "failed")
+assert(
+  unstableUntilMaxCliResult.data.trace.some(
+    (event) =>
+      event.kind === "decision" &&
+      event.metadata?.reason === "ordered result coverage could not be proven",
+  ),
+)
 
 const albumTabClicks = stalledCliResult.data.trace.filter(
   (event) =>
@@ -212,7 +411,115 @@ assert(
   ),
 )
 
+const falseNegativeHelperPath = writeLoopHelper("type-false-negative")
+const falseNegativeCliRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "usecases",
+    "run",
+    "UC-102",
+    "--mac-helper",
+    falseNegativeHelperPath,
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(
+  falseNegativeCliRun.status,
+  0,
+  falseNegativeCliRun.stderr || falseNegativeCliRun.stdout,
+)
+
+const falseNegativeCliResult = JSON.parse(falseNegativeCliRun.stdout)
+assert.equal(falseNegativeCliResult.ok, true)
+assert.equal(falseNegativeCliResult.data.status, "passed")
+assertTargetLoopMetadata(falseNegativeCliResult.data.trace)
+assert(
+  falseNegativeCliResult.data.trace.some(
+    (event) =>
+      event.kind === "result" && event.action?.kind === "type" && event.result?.status === "failed",
+  ),
+)
+assert(
+  falseNegativeCliResult.data.trace.some(
+    (event) => event.kind === "observation" && event.action?.kind === "type",
+  ),
+)
+const submitAfterFalseNegative = falseNegativeCliResult.data.trace.find(
+  (event) => event.kind === "action" && event.action?.input?.targetModePhase === "submit-query",
+)
+assert.equal(submitAfterFalseNegative.action.input.targetModeVerifiedOutcome.actionKind, "type")
+assert.equal(submitAfterFalseNegative.action.input.targetModeVerifiedOutcome.actionStatus, "failed")
+assert.equal(
+  submitAfterFalseNegative.action.input.targetModeVerifiedOutcome.actionReportedFailed,
+  true,
+)
+
 console.log("computer-use loop regression checks passed")
+
+function assertTargetLoopMetadata(trace) {
+  const targetActions = trace.filter(
+    (event) => event.kind === "action" && event.action?.input?.targetModeLoop,
+  )
+  assert(targetActions.length > 0)
+
+  for (const event of targetActions) {
+    assert.equal(event.action.input.targetModePlanner, "heuristic-fallback")
+    assert.equal(typeof event.action.input.targetModeIntent?.kind, "string")
+    if (event.action.kind !== "extract") {
+      assert.equal(event.action.input.targetModeObservationBarrier, true)
+    }
+  }
+
+  const decidedActions = targetActions.filter(
+    (event) => event.action.input.targetModeVerifiedOutcome,
+  )
+  assert(decidedActions.length > 0)
+  assert(
+    decidedActions.every(
+      (event) => typeof event.action.input.targetModeVerifiedOutcome.observationId === "string",
+    ),
+  )
+
+  const decisions = trace.filter(
+    (event) => event.kind === "decision" && event.metadata?.targetModeLoop === true,
+  )
+  assert(decisions.length > 0)
+
+  for (const actionEvent of decidedActions) {
+    const decision = trace
+      .filter((event) => event.index < actionEvent.index)
+      .findLast(
+        (event) =>
+          event.kind === "decision" &&
+          event.metadata?.nextAction?.description === actionEvent.action.input.description,
+      )
+
+    assert(decision, `missing decision event for ${actionEvent.action.input.description}`)
+    assert.equal(
+      decision.observation?.id,
+      actionEvent.action.input.targetModeVerifiedOutcome.observationId,
+    )
+  }
+
+  const settledResults = trace.filter(
+    (event) =>
+      event.kind === "result" &&
+      event.action?.input?.targetModeObservationBarrier === true &&
+      event.action?.kind !== "extract",
+  )
+  assert(settledResults.length > 0)
+  assert(settledResults.every((event) => event.result?.metadata?.settleRequired === true))
+}
 
 function writeLoopHelper(scenario) {
   const dir = join(tmpdir(), "computer-use-harness")
@@ -255,11 +562,13 @@ lines.on("line", (line) => {
   }
 
   if (request.method === "getAppState") {
+    const currentObservation = observation(target)
     respond(request.id, {
       target,
       windows: windows(target),
-      observation: observation(target),
+      observation: currentObservation,
     })
+    advanceLoadingStage()
     return
   }
 
@@ -275,6 +584,11 @@ lines.on("line", (line) => {
 
   if (request.method === "type") {
     query = params.text ?? ""
+    if (scenario === "type-false-negative") {
+      respond(request.id, failed(action.id, "Unable to paste text into search element."))
+      return
+    }
+
     respond(request.id, passed(action.id, { text: query }))
     return
   }
@@ -289,15 +603,47 @@ lines.on("line", (line) => {
 
   if (request.method === "click") {
     if ((action.element?.name ?? "") === "专辑" && scenario !== "stalled-tab") {
-      stage = "albums"
+      stage = "albums-top"
+    }
+    if ((action.element?.name ?? "") === "太阳之子") {
+      stage = "detail"
     }
     respond(request.id, passed(action.id, { clicked: action.element?.name ?? "" }))
     return
   }
 
   if (request.method === "scroll") {
-    if (scenario === "stalled-tab" && stage === "songs") {
-      stage = "albums"
+    if (scenario === "unstable-until-max" && stage === "albums-top") {
+      stage = "albums-middle"
+    } else if (scenario === "unstable-until-max" && stage === "albums-middle") {
+      stage = "albums-bottom"
+    } else if (scenario === "unstable-until-max" && stage === "albums-bottom") {
+      stage = "albums-tail"
+    } else if (scenario === "stalled-tab" && stage === "songs") {
+      stage = "albums-top"
+    } else if (
+      (scenario === "stuck-scroll" || scenario === "loading-after-drag") &&
+      stage === "albums-top"
+    ) {
+      stage = "albums-top"
+    } else if (stage === "albums-top") {
+      stage = "albums-bottom"
+    }
+    respond(request.id, passed(action.id))
+    return
+  }
+
+  if (request.method === "drag") {
+    if (scenario === "unstable-until-max" && stage === "albums-top") {
+      stage = "albums-middle"
+    } else if (scenario === "unstable-until-max" && stage === "albums-middle") {
+      stage = "albums-bottom"
+    } else if (scenario === "unstable-until-max" && stage === "albums-bottom") {
+      stage = "albums-tail"
+    } else if (scenario === "loading-after-drag" && stage === "albums-top") {
+      stage = "albums-loading"
+    } else if (stage === "albums-top") {
+      stage = "albums-bottom"
     }
     respond(request.id, passed(action.id))
     return
@@ -322,6 +668,28 @@ function passed(actionId, metadata = {}) {
     status: "passed",
     adapter: "mac-helper",
     metadata,
+  }
+}
+
+function advanceLoadingStage() {
+  if (scenario === "loading-after-drag" && stage === "albums-loading") {
+    stage = "albums-bottom"
+  }
+  if (scenario === "loading-after-drag" && stage === "detail-loading") {
+    stage = "detail"
+  }
+}
+
+function failed(actionId, message) {
+  return {
+    actionId,
+    ok: false,
+    status: "failed",
+    adapter: "mac-helper",
+    error: {
+      code: "ACTION_FAILED",
+      message,
+    },
   }
 }
 
@@ -361,9 +729,28 @@ function observation(target) {
 
 function elements(target) {
   const search = element(target, "search", "AXTextField", "搜索", 120, 120, 360, 32)
-  if (stage === "albums") {
+  if (stage === "albums-top") {
     return [
       search,
+      element(target, "sidebar:add", "AXButton", "添加新歌单", 24, 250, 80, 28, "按钮"),
+      element(target, "tab:songs", "AXUnknown", "歌曲", 120, 180, 120, 28, "按钮"),
+      element(target, "tab:albums", "AXUnknown", "专辑", 210, 180, 120, 28, "按钮"),
+      element(target, "album:old", "AXStaticText", "最伟大的作品", 120, 250),
+      element(target, "artist:old", "AXStaticText", "周杰伦", 320, 250),
+      element(target, "date:old", "AXStaticText", "2022-07-15", 430, 250),
+      element(target, "album:bedtime", "AXStaticText", "周杰伦的床边故事", 120, 320),
+      element(target, "artist:bedtime", "AXStaticText", "周杰伦", 320, 320),
+      element(target, "date:bedtime", "AXStaticText", "2016-06-24", 430, 320),
+      element(target, "album:other", "AXStaticText", "别人的新专辑", 120, 390),
+      element(target, "artist:other", "AXStaticText", "其他歌手", 320, 390),
+      element(target, "date:other", "AXStaticText", "2027-01-01", 430, 390),
+    ]
+  }
+
+  if (stage === "albums-bottom") {
+    return [
+      search,
+      element(target, "sidebar:add", "AXButton", "添加新歌单", 24, 320, 80, 28, "按钮"),
       element(target, "tab:songs", "AXUnknown", "歌曲", 120, 180, 120, 28, "按钮"),
       element(target, "tab:albums", "AXUnknown", "专辑", 210, 180, 120, 28, "按钮"),
       element(target, "album:old", "AXStaticText", "最伟大的作品", 120, 250),
@@ -375,6 +762,69 @@ function elements(target) {
       element(target, "album:other", "AXStaticText", "别人的新专辑", 120, 390),
       element(target, "artist:other", "AXStaticText", "其他歌手", 320, 390),
       element(target, "date:other", "AXStaticText", "2027-01-01", 430, 390),
+    ]
+  }
+
+  if (stage === "albums-middle") {
+    return [
+      search,
+      element(target, "sidebar:add", "AXButton", "添加新歌单", 24, 290, 80, 28, "按钮"),
+      element(target, "tab:songs", "AXUnknown", "歌曲", 120, 180, 120, 28, "按钮"),
+      element(target, "tab:albums", "AXUnknown", "专辑", 210, 180, 120, 28, "按钮"),
+      element(target, "album:old", "AXStaticText", "最伟大的作品", 120, 230),
+      element(target, "artist:old", "AXStaticText", "周杰伦", 320, 230),
+      element(target, "date:old", "AXStaticText", "2022-07-15", 430, 230),
+      element(target, "album:bedtime", "AXStaticText", "周杰伦的床边故事", 120, 300),
+      element(target, "artist:bedtime", "AXStaticText", "周杰伦", 320, 300),
+      element(target, "date:bedtime", "AXStaticText", "2016-06-24", 430, 300),
+      element(target, "album:opus12", "AXStaticText", "十二新作", 120, 370),
+      element(target, "artist:opus12", "AXStaticText", "周杰伦", 320, 370),
+      element(target, "date:opus12", "AXStaticText", "2012-12-28", 430, 370),
+    ]
+  }
+
+  if (stage === "albums-tail") {
+    return [
+      search,
+      element(target, "sidebar:add", "AXButton", "添加新歌单", 24, 350, 80, 28, "按钮"),
+      element(target, "tab:songs", "AXUnknown", "歌曲", 120, 180, 120, 28, "按钮"),
+      element(target, "tab:albums", "AXUnknown", "专辑", 210, 180, 120, 28, "按钮"),
+      element(target, "album:new", "AXStaticText", "太阳之子", 120, 260),
+      element(target, "artist:new", "AXStaticText", "周杰伦", 320, 260),
+      element(target, "date:new", "AXStaticText", "2026-03-25", 430, 260),
+      element(target, "album:old", "AXStaticText", "最伟大的作品", 120, 330),
+      element(target, "artist:old", "AXStaticText", "周杰伦", 320, 330),
+      element(target, "date:old", "AXStaticText", "2022-07-15", 430, 330),
+      element(target, "album:other", "AXStaticText", "别人的新专辑", 120, 400),
+      element(target, "artist:other", "AXStaticText", "其他歌手", 320, 400),
+      element(target, "date:other", "AXStaticText", "2027-01-01", 430, 400),
+    ]
+  }
+
+  if (stage === "albums-loading") {
+    return [
+      search,
+      element(target, "loading:cover", "AXGroup", "加载中", 120, 250, 240, 180),
+      element(target, "loading:list", "AXGroup", "加载占位", 120, 470, 760, 240),
+    ]
+  }
+
+  if (stage === "detail") {
+    return [
+      search,
+      element(target, "tab:albums", "AXUnknown", "专辑", 210, 180, 120, 28, "按钮"),
+      element(target, "album:title", "AXStaticText", "太阳之子", 120, 250, 240, 36),
+      element(target, "album:artist", "AXStaticText", "歌手：周杰伦", 120, 310, 240, 28),
+      element(target, "album:date", "AXStaticText", "发行日期：2026-03-25", 120, 350, 260, 28),
+      element(target, "album:tracks", "AXStaticText", "曲目数：13 首", 120, 390, 220, 28),
+    ]
+  }
+
+  if (stage === "detail-loading") {
+    return [
+      search,
+      element(target, "loading:cover", "AXGroup", "加载中", 120, 250, 240, 180),
+      element(target, "loading:list", "AXGroup", "加载占位", 120, 470, 760, 240),
     ]
   }
 

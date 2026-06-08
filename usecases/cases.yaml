@@ -197,6 +197,31 @@
     permissions:
       - accessibility
       - screenRecording
+  goal:
+    mode: target
+    entity: album
+    query: 周杰伦
+    constraints:
+      artist: 周杰伦
+    navigation:
+      semanticTabs:
+        - 专辑
+        - Albums
+        - Album
+    coverage:
+      strategy: scroll-until-stable
+      maxScans: 3
+      stableObservations: 1
+      minObservations: 2
+    orderBy:
+      field: releaseDate
+      direction: desc
+    requiredFields:
+      - albumName
+      - releaseDate
+      - artist
+    confirmation: detail
+    maxIterations: 12
   steps:
     - open app
     - read app state
@@ -228,6 +253,58 @@
     - extract current page information including artist and album details
   success:
     - Current page information extracted successfully
+
+- id: UC-104
+  title: Find G.E.M. latest album in QQ Music
+  target:
+    kind: app
+    id: com.tencent.QQMusicMac
+    name: QQ音乐
+    platform: macos
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+      - screenRecording
+  goal:
+    mode: target
+    entity: album
+    query: 邓紫棋
+    constraints:
+      artist: 邓紫棋
+    navigation:
+      semanticTabs:
+        - 专辑
+        - Albums
+        - Album
+    coverage:
+      strategy: scroll-until-stable
+      maxScans: 3
+      stableObservations: 1
+      minObservations: 2
+    orderBy:
+      field: releaseDate
+      direction: desc
+    requiredFields:
+      - albumName
+      - releaseDate
+      - artist
+    confirmation: detail
+    maxIterations: 12
+  steps:
+    - open app
+    - read app state
+    - type 邓紫棋 into search input
+    - press key Enter in search input wait for state change timeout 5s
+    - wait for search results to load
+    - click tab named 专辑
+    - wait for album results to load
+    - extract latest G.E.M. album from visible album results; only accept entries where artist is 邓紫棋, compare release dates, and return albumName releaseDate artist
+  success:
+    - QQ音乐 is the target app
+    - search query submitted
+    - album tab loaded
+    - latest G.E.M. album name artist and release date extracted successfully
 
 - id: UC-110
   title: Edit and save a file in Sublime Text

@@ -48,19 +48,22 @@ export async function observeAction(
     previousObservation,
     observed.observation,
   )
+  const settled = await settleObservationIfRequested(helper, action, verification.observation)
   const baseMetadata = {
     helperMethod: "getAppState",
-    observeLatencyMs: observed.latencyMs + verification.extraObserveLatencyMs,
-    observeAttempts: 1 + verification.extraObserveAttempts,
+    observeLatencyMs:
+      observed.latencyMs + verification.extraObserveLatencyMs + settled.extraObserveLatencyMs,
+    observeAttempts: 1 + verification.extraObserveAttempts + settled.extraObserveAttempts,
     ...verification.metadata,
+    ...settled.metadata,
   }
 
   return {
     metadata: baseMetadata,
-    observation: verification.observation,
+    observation: settled.observation,
     result: observationResult(
       action,
-      verification.observation,
+      settled.observation,
       baseMetadata,
       verification.failed,
       verification.failureMessage,
@@ -82,12 +85,34 @@ export async function observeAfterAction(
   }
 
   if (!call.value.ok) {
+    const observed = await tryMeasureObservation(helper, action)
+    const settled = observed.observation
+      ? await settleObservationIfRequested(helper, action, observed.observation)
+      : undefined
+    const metadata: JsonObject = {
+      ...baseMetadata,
+      actionReportedFailed: true,
+      verification: settled?.observation
+        ? "post-action-observe-after-failed-action"
+        : "action-failed-without-post-observation",
+      ...(settled?.observation
+        ? {
+            observeLatencyMs: (observed.latencyMs ?? 0) + settled.extraObserveLatencyMs,
+            observeAttempts: 1 + settled.extraObserveAttempts,
+          }
+        : {}),
+      ...(observed.errorMessage ? { observeFailure: observed.errorMessage } : {}),
+      ...(settled?.metadata ?? {}),
+    }
+
     return {
       result: {
-        ...withMetadata(call.value, baseMetadata),
+        ...withMetadata(call.value, metadata),
         adapter: action.adapter,
+        ...(settled?.observation ? { observation: settled.observation } : {}),
       },
-      metadata: baseMetadata,
+      ...(settled?.observation ? { observation: settled.observation } : {}),
+      metadata,
     }
   }
 
@@ -98,24 +123,27 @@ export async function observeAfterAction(
     previousObservation,
     observed.observation,
   )
+  const settled = await settleObservationIfRequested(helper, action, verification.observation)
   const metadata: JsonObject = {
     ...baseMetadata,
-    observeLatencyMs: observed.latencyMs + verification.extraObserveLatencyMs,
-    observeAttempts: 1 + verification.extraObserveAttempts,
+    observeLatencyMs:
+      observed.latencyMs + verification.extraObserveLatencyMs + settled.extraObserveLatencyMs,
+    observeAttempts: 1 + verification.extraObserveAttempts + settled.extraObserveAttempts,
     verification: verification.verificationMode,
     ...verification.metadata,
+    ...settled.metadata,
   }
 
   if (verification.failed) {
     return {
       metadata,
-      observation: verification.observation,
+      observation: settled.observation,
       result: {
         ...withMetadata(call.value, metadata),
         adapter: action.adapter,
         ok: false,
         status: "failed",
-        observation: verification.observation,
+        observation: settled.observation,
         error: {
           code: ActionErrorCode.ACTION_FAILED,
           message:
@@ -134,12 +162,25 @@ export async function observeAfterAction(
 
   return {
     metadata,
-    observation: verification.observation,
+    observation: settled.observation,
     result: {
       ...withMetadata(call.value, metadata),
       adapter: action.adapter,
-      observation: verification.observation,
+      observation: settled.observation,
     },
+  }
+}
+
+async function tryMeasureObservation(
+  helper: MacHelperClient,
+  action: Action,
+): Promise<{ observation?: Observation; latencyMs?: number; errorMessage?: string }> {
+  try {
+    return await measureObservation(helper, action)
+  } catch (error) {
+    return {
+      errorMessage: error instanceof Error ? error.message : String(error),
+    }
   }
 }
 
@@ -288,6 +329,66 @@ function observationResult(
   }
 }
 
+async function settleObservationIfRequested(
+  helper: MacHelperClient,
+  action: Action,
+  firstObservation: Observation,
+): Promise<{
+  observation: Observation
+  metadata: JsonObject
+  extraObserveLatencyMs: number
+  extraObserveAttempts: number
+}> {
+  const required =
+    booleanInput(action, "targetModeObservationBarrier", false) ||
+    booleanInput(action, "settleAfterAction", false)
+  if (!required) {
+    return {
+      observation: firstObservation,
+      metadata: {},
+      extraObserveLatencyMs: 0,
+      extraObserveAttempts: 0,
+    }
+  }
+
+  const timeout = positiveNumberInput(action, "settleTimeoutMs", 1200)
+  const pollInterval = positiveNumberInput(action, "settlePollIntervalMs", 250)
+  const requiredStableObservations = positiveIntegerInput(action, "settleStableObservations", 1)
+  const deadline = Date.now() + timeout
+  let currentObservation = firstObservation
+  let currentFingerprint = observationFingerprint(currentObservation)
+  let stableObservations = 0
+  let extraObserveLatencyMs = 0
+  let extraObserveAttempts = 0
+
+  while (Date.now() < deadline && stableObservations < requiredStableObservations) {
+    await sleep(pollInterval)
+    const observed = await measureObservation(helper, action)
+    extraObserveLatencyMs += observed.latencyMs
+    extraObserveAttempts += 1
+
+    const nextFingerprint = observationFingerprint(observed.observation)
+    stableObservations = nextFingerprint === currentFingerprint ? stableObservations + 1 : 0
+    currentFingerprint = nextFingerprint
+    currentObservation = observed.observation
+  }
+
+  return {
+    observation: currentObservation,
+    extraObserveLatencyMs,
+    extraObserveAttempts,
+    metadata: {
+      settleRequired: true,
+      settleTimeoutMs: timeout,
+      settlePollIntervalMs: pollInterval,
+      settleRequiredStableObservations: requiredStableObservations,
+      settleStableObservations: stableObservations,
+      settleAttempts: extraObserveAttempts,
+      settled: stableObservations >= requiredStableObservations,
+    },
+  }
+}
+
 function semanticCondition(action: Action): SemanticCondition | undefined {
   const explicit = explicitTargetStateCondition(action)
   if (explicit) {
@@ -342,6 +443,10 @@ function explicitTargetStateCondition(action: Action): SemanticCondition | undef
     return { kind, keyword: normalizedKeyword }
   }
 
+  if (kind === "text-visible" || kind === "detail-visible") {
+    return { kind, keyword: normalizedKeyword }
+  }
+
   return undefined
 }
 
@@ -358,11 +463,62 @@ function observationMatchesCondition(
     return searchResultsLoaded(observation, keyword)
   }
 
+  if (condition.kind === "text-visible") {
+    return keyword ? visibleTextIncludes(observation, keyword) : false
+  }
+
+  if (condition.kind === "detail-visible") {
+    return detailEvidenceVisible(observation, keyword)
+  }
+
   if (condition.kind !== "results-loaded") {
     return false
   }
 
   return tabContentLoaded(observation, keyword)
+}
+
+function visibleTextIncludes(observation: Observation, keyword: string): boolean {
+  return observation.elements
+    .filter((element) => isVisibleFrame(element.metadata?.frame, observation))
+    .some((element) => elementTextValues(element).some((text) => normalize(text).includes(keyword)))
+}
+
+function elementTextValues(element: Observation["elements"][number]): string[] {
+  const metadata = element.metadata ?? {}
+
+  return [
+    element.name,
+    stringMetadata(metadata.value),
+    stringMetadata(metadata.title),
+    stringMetadata(metadata.description),
+    stringMetadata(metadata.placeholder),
+  ].filter((value): value is string => typeof value === "string" && value.trim() !== "")
+}
+
+function stringMetadata(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
+}
+
+function detailEvidenceVisible(observation: Observation, keyword: string): boolean {
+  const entries = visibleEntries(observation)
+  const textMatches = keyword ? visibleTextIncludes(observation, keyword) : true
+
+  return (
+    textMatches && hasDateLikeEntry(entries) && entries.some((entry) => isDetailSignal(entry.name))
+  )
+}
+
+function isDetailSignal(value: string): boolean {
+  const normalized = normalize(value)
+  return (
+    normalized.includes("发行") ||
+    normalized.includes("release") ||
+    normalized.includes("曲目") ||
+    normalized.includes("tracks") ||
+    normalized.includes("播放全部") ||
+    normalized.includes("专辑信息")
+  )
 }
 
 function tabContentLoaded(observation: Observation, keyword: string): boolean {
@@ -622,7 +778,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface SemanticCondition {
-  kind: "results-loaded" | "search-results-loaded" | "tab-activated"
+  kind:
+    | "results-loaded"
+    | "search-results-loaded"
+    | "tab-activated"
+    | "text-visible"
+    | "detail-visible"
   keyword: string
 }
 
