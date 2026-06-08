@@ -1,6 +1,6 @@
+import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
 import type { Action, ActionResult, JsonObject, Observation } from "../core/contracts.js"
 import { ActionErrorCode } from "../core/errors.js"
-import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
 
 export interface MeasuredActionCall {
   value: ActionResult
@@ -42,8 +42,13 @@ export async function observeAction(
   previousObservation: Observation | undefined,
 ): Promise<{ result: ActionResult; observation?: Observation; metadata?: JsonObject }> {
   const observed = await measureObservation(helper, action)
-  const verification = await verifyObservationStateChange(helper, action, previousObservation, observed.observation)
-  const metadata = {
+  const verification = await verifyObservationStateChange(
+    helper,
+    action,
+    previousObservation,
+    observed.observation,
+  )
+  const baseMetadata = {
     helperMethod: "getAppState",
     observeLatencyMs: observed.latencyMs + verification.extraObserveLatencyMs,
     observeAttempts: 1 + verification.extraObserveAttempts,
@@ -51,9 +56,15 @@ export async function observeAction(
   }
 
   return {
-    metadata,
+    metadata: baseMetadata,
     observation: verification.observation,
-    result: observationResult(action, verification.observation, metadata, verification.failed),
+    result: observationResult(
+      action,
+      verification.observation,
+      baseMetadata,
+      verification.failed,
+      verification.failureMessage,
+    ),
   }
 }
 
@@ -81,12 +92,17 @@ export async function observeAfterAction(
   }
 
   const observed = await measureObservation(helper, action)
-  const verification = await verifyObservationStateChange(helper, action, previousObservation, observed.observation)
-  const metadata = {
+  const verification = await verifyObservationStateChange(
+    helper,
+    action,
+    previousObservation,
+    observed.observation,
+  )
+  const metadata: JsonObject = {
     ...baseMetadata,
     observeLatencyMs: observed.latencyMs + verification.extraObserveLatencyMs,
     observeAttempts: 1 + verification.extraObserveAttempts,
-    verification: verification.required ? "state-change" : "post-action-observe",
+    verification: verification.verificationMode,
     ...verification.metadata,
   }
 
@@ -102,10 +118,14 @@ export async function observeAfterAction(
         observation: verification.observation,
         error: {
           code: ActionErrorCode.ACTION_FAILED,
-          message: "Timed out waiting for state change after action.",
+          message:
+            verification.failureMessage ?? "Timed out waiting for state change after action.",
           details: {
             timeoutMs: timeoutMs(action),
-            stateChanged: false,
+            ...(typeof metadata.stateChanged === "boolean"
+              ? { stateChanged: metadata.stateChanged }
+              : {}),
+            ...(metadata.targetState ? { targetState: metadata.targetState } : {}),
           },
         },
       },
@@ -133,18 +153,30 @@ async function verifyObservationStateChange(
   metadata: JsonObject
   required: boolean
   failed: boolean
+  failureMessage?: string
+  verificationMode: string
   extraObserveLatencyMs: number
   extraObserveAttempts: number
 }> {
   const required = booleanInput(action, "waitForStateChange", false)
-  const previousFingerprint = previousObservation ? observationFingerprint(previousObservation) : undefined
+  const condition = semanticCondition(action)
+  const previousFingerprint = previousObservation
+    ? observationFingerprint(previousObservation)
+    : undefined
   let currentObservation = firstObservation
   let currentFingerprint = observationFingerprint(currentObservation)
-  let changed = previousFingerprint === undefined ? undefined : currentFingerprint !== previousFingerprint
+  let changed =
+    previousFingerprint === undefined ? undefined : currentFingerprint !== previousFingerprint
+  let targetMatched = condition
+    ? observationMatchesCondition(currentObservation, condition)
+    : undefined
   let extraObserveLatencyMs = 0
   let extraObserveAttempts = 0
 
-  if (required && previousFingerprint !== undefined && !changed) {
+  if (
+    (required && previousFingerprint !== undefined && !changed) ||
+    (condition && !targetMatched)
+  ) {
     const deadline = Date.now() + timeoutMs(action)
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs(action))
@@ -154,8 +186,13 @@ async function verifyObservationStateChange(
       currentObservation = observed.observation
       currentFingerprint = observationFingerprint(currentObservation)
       changed = currentFingerprint !== previousFingerprint
+      targetMatched = condition
+        ? observationMatchesCondition(currentObservation, condition)
+        : undefined
 
-      if (changed) {
+      const stateChangeSatisfied = !required || previousFingerprint === undefined || changed
+      const targetStateSatisfied = !condition || targetMatched
+      if (stateChangeSatisfied && targetStateSatisfied) {
         break
       }
     }
@@ -172,12 +209,35 @@ async function verifyObservationStateChange(
     metadata.timeoutMs = timeoutMs(action)
     metadata.pollIntervalMs = pollIntervalMs(action)
   }
+  if (condition) {
+    metadata.targetState = {
+      kind: condition.kind,
+      keyword: condition.keyword,
+      matched: targetMatched === true,
+    }
+    metadata.timeoutMs = timeoutMs(action)
+    metadata.pollIntervalMs = pollIntervalMs(action)
+  }
+
+  const stateChangeFailed = required && previousFingerprint !== undefined && changed === false
+  const targetStateFailed = condition !== undefined && targetMatched !== true
+  const failureMessage = targetStateFailed
+    ? `Target state was not reached: ${condition.kind} '${condition.keyword}'.`
+    : stateChangeFailed
+      ? "Timed out waiting for state change after action."
+      : undefined
 
   return {
     observation: currentObservation,
     metadata,
     required,
-    failed: required && previousFingerprint !== undefined && changed === false,
+    failed: stateChangeFailed || targetStateFailed,
+    failureMessage,
+    verificationMode: condition
+      ? "target-state"
+      : required
+        ? "state-change"
+        : "post-action-observe",
     extraObserveLatencyMs,
     extraObserveAttempts,
   }
@@ -201,6 +261,7 @@ function observationResult(
   observation: Observation,
   metadata: JsonObject,
   failed: boolean,
+  failureMessage = "Timed out waiting for state change.",
 ): ActionResult {
   return {
     actionId: action.id,
@@ -213,15 +274,249 @@ function observationResult(
       ? {
           error: {
             code: ActionErrorCode.ACTION_FAILED,
-            message: "Timed out waiting for state change.",
+            message: failureMessage,
             details: {
               timeoutMs: timeoutMs(action),
-              stateChanged: false,
+              ...(typeof metadata.stateChanged === "boolean"
+                ? { stateChanged: metadata.stateChanged }
+                : {}),
+              ...(metadata.targetState ? { targetState: metadata.targetState } : {}),
             },
           },
         }
       : {}),
   }
+}
+
+function semanticCondition(action: Action): SemanticCondition | undefined {
+  const explicit = explicitTargetStateCondition(action)
+  if (explicit) {
+    return explicit
+  }
+
+  const description = stringInput(action, "description", "")
+  const normalized = normalize(description)
+  if (action.kind !== "observe") {
+    return undefined
+  }
+
+  if (!normalized.includes("wait") || !normalized.includes("load")) {
+    return undefined
+  }
+
+  const match = description.match(/\bwait\s+for\s+(.+?)\s+results?\s+(?:to\s+)?load/i)
+  const keyword = match?.[1]?.trim()
+  if (!keyword || keyword.length > 40) {
+    return undefined
+  }
+
+  if (!isKnownResultCategory(normalize(keyword))) {
+    return undefined
+  }
+
+  return {
+    kind: "results-loaded",
+    keyword,
+  }
+}
+
+function explicitTargetStateCondition(action: Action): SemanticCondition | undefined {
+  const state = action.input?.targetState
+  if (!isRecord(state)) {
+    return undefined
+  }
+
+  const kind = typeof state.kind === "string" ? state.kind : undefined
+  const keyword = typeof state.keyword === "string" ? state.keyword.trim() : undefined
+  if (!kind) {
+    return undefined
+  }
+
+  const normalizedKeyword = keyword ?? ""
+
+  if (kind === "tab-activated") {
+    return normalizedKeyword ? { kind, keyword: normalizedKeyword } : undefined
+  }
+
+  if (kind === "results-loaded" || kind === "search-results-loaded") {
+    return { kind, keyword: normalizedKeyword }
+  }
+
+  return undefined
+}
+
+function observationMatchesCondition(
+  observation: Observation,
+  condition: SemanticCondition,
+): boolean {
+  const keyword = normalize(condition.keyword)
+  if (condition.kind === "tab-activated") {
+    return tabContentLoaded(observation, keyword) || selectedTabVisible(observation, keyword)
+  }
+
+  if (condition.kind === "search-results-loaded") {
+    return searchResultsLoaded(observation, keyword)
+  }
+
+  if (condition.kind !== "results-loaded") {
+    return false
+  }
+
+  return tabContentLoaded(observation, keyword)
+}
+
+function tabContentLoaded(observation: Observation, keyword: string): boolean {
+  const entries = visibleEntries(observation)
+  if (entries.length < 3) {
+    return false
+  }
+
+  if (isAlbumKeyword(keyword)) {
+    return hasDateLikeEntry(entries) && hasRecordLikeRows(entries)
+  }
+
+  return entries.some((entry) => normalize(entry.name).includes(keyword))
+}
+
+function searchResultsLoaded(observation: Observation, keyword: string): boolean {
+  if (!keyword) {
+    return false
+  }
+
+  return visibleEntries(observation).some((entry) => normalize(entry.name).includes(keyword))
+}
+
+function selectedTabVisible(observation: Observation, keyword: string): boolean {
+  return observation.elements.some((element) => {
+    if (!element.name || normalize(element.name) !== keyword) {
+      return false
+    }
+
+    const role = elementSemanticRole(element)
+    if (!isTabControlRole(role) || !isVisibleFrame(element.metadata?.frame, observation)) {
+      return false
+    }
+
+    const selected = element.metadata?.selected
+    const value = element.metadata?.value
+    return selected === true || normalize(value) === "true" || normalize(value) === "selected"
+  })
+}
+
+function visibleEntries(observation: Observation): VisibleEntry[] {
+  return observation.elements
+    .filter((element) => element.name && isVisibleFrame(element.metadata?.frame, observation))
+    .map((element) => ({
+      name: element.name ?? "",
+      role: element.role,
+      ...entryPosition(element.metadata?.frame),
+    }))
+}
+
+function hasDateLikeEntry(entries: VisibleEntry[]): boolean {
+  return entries.some((entry) => /\b\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?\b/.test(entry.name))
+}
+
+function hasRecordLikeRows(entries: VisibleEntry[]): boolean {
+  const rowBuckets = new Map<number, number>()
+
+  for (const entry of entries) {
+    if (entry.y === undefined) {
+      continue
+    }
+
+    const bucket = Math.round(entry.y / 36)
+    rowBuckets.set(bucket, (rowBuckets.get(bucket) ?? 0) + 1)
+  }
+
+  return [...rowBuckets.values()].some((count) => count >= 3)
+}
+
+function entryPosition(frame: unknown): Pick<VisibleEntry, "x" | "y"> {
+  if (!isRecord(frame)) {
+    return {}
+  }
+
+  return {
+    ...(typeof frame.x === "number" ? { x: frame.x } : {}),
+    ...(typeof frame.y === "number" ? { y: frame.y } : {}),
+  }
+}
+
+function isVisibleFrame(frame: unknown, observation: Observation): boolean {
+  if (!isRecord(frame)) {
+    return true
+  }
+
+  const x = typeof frame.x === "number" ? frame.x : 0
+  const y = typeof frame.y === "number" ? frame.y : 0
+  const width = typeof frame.width === "number" ? frame.width : 0
+  const height = typeof frame.height === "number" ? frame.height : 0
+  const screenWidth = observation.coordinateSpace?.screenWidth
+  const screenHeight = observation.coordinateSpace?.screenHeight
+
+  if (width <= 0 || height <= 0) {
+    return false
+  }
+
+  if (typeof screenWidth === "number" && typeof screenHeight === "number") {
+    return x + width > 0 && y + height > 0 && x < screenWidth && y < screenHeight
+  }
+
+  return true
+}
+
+function isAlbumKeyword(keyword: string): boolean {
+  return ["album", "albums", "专辑"].some((token) => keyword.includes(token))
+}
+
+function isKnownResultCategory(keyword: string): boolean {
+  return [
+    "album",
+    "albums",
+    "专辑",
+    "song",
+    "songs",
+    "track",
+    "tracks",
+    "歌曲",
+    "单曲",
+    "artist",
+    "artists",
+    "歌手",
+    "艺人",
+    "playlist",
+    "playlists",
+    "歌单",
+    "video",
+    "videos",
+    "mv",
+    "视频",
+  ].some((token) => keyword.includes(token))
+}
+
+function isTabControlRole(role: string): boolean {
+  return (
+    role.includes("tab") ||
+    role.includes("button") ||
+    role.includes("按钮") ||
+    role.includes("radio") ||
+    role.includes("segmented") ||
+    role.includes("toggle") ||
+    role.includes("标签")
+  )
+}
+
+function elementSemanticRole(element: Observation["elements"][number]): string {
+  return [
+    element.role,
+    element.metadata?.roleDescription,
+    element.metadata?.subrole,
+    element.metadata?.axIdentifier,
+  ]
+    .map(normalize)
+    .filter(Boolean)
+    .join(" ")
 }
 
 function observationFingerprint(observation: Observation): string {
@@ -309,6 +604,31 @@ function booleanInput(action: Action, key: string, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback
 }
 
+function stringInput(action: Action, key: string, fallback: string): string {
+  const value = action.input?.[key]
+  return typeof value === "string" && value.trim() !== "" ? value : fallback
+}
+
+function normalize(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : ""
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+interface SemanticCondition {
+  kind: "results-loaded" | "search-results-loaded" | "tab-activated"
+  keyword: string
+}
+
+interface VisibleEntry {
+  name: string
+  role?: string
+  x?: number
+  y?: number
 }

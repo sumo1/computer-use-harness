@@ -8,14 +8,17 @@ import type {
   Action,
   ActionResult,
   JsonObject,
+  JsonValue,
   Observation,
   PolicyDecision,
   TraceEvent,
 } from "../core/contracts.js"
 import { ActionErrorCode } from "../core/errors.js"
+import { extractionContractFromAction, missingRequiredFields } from "../core/extraction-contract.js"
 import { evaluatePolicy } from "../runtime/policy.js"
-import { createUseCaseAction, createUseCaseTarget, appendTraceEvent } from "./action-plan.js"
+import { appendTraceEvent, createUseCaseAction, createUseCaseTarget } from "./action-plan.js"
 import { measureActionCall, observeAction, observeAfterAction } from "./action-verification.js"
+import { extractionRecoveryCandidates } from "./recovery-plan.js"
 import type { UseCase, UseCaseRunResult, UseCaseStepResult } from "./types.js"
 
 export interface NativeUseCaseRunnerOptions {
@@ -31,10 +34,12 @@ interface QueuedUseCaseStep {
 interface AdaptiveRunState {
   extractRetryCounts: Map<string, number>
   triedTargets: Set<string>
+  triedNavigationDescriptions: Set<string>
   clickRecoveryCounts: Map<string, number>
+  lastRecoveryDescription?: string
 }
 
-const MAX_ADAPTIVE_EXTRACT_RETRIES = 3
+const MAX_ADAPTIVE_EXTRACT_RETRIES = 6
 
 export async function runNativeUseCase(
   useCase: UseCase,
@@ -59,11 +64,13 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   const adaptiveState: AdaptiveRunState = {
     extractRetryCounts: new Map(),
     triedTargets: new Set(),
+    triedNavigationDescriptions: new Set(),
     clickRecoveryCounts: new Map(),
   }
   let currentObservation: Observation | undefined
   let firstActionRecorded = false
   let firstStateRecorded = false
+  let lastSearchQuery: string | undefined
 
   const adapter = getAppAdapter(target.id)
   const apiKey = process.env.ANTHROPIC_API_KEY
@@ -85,7 +92,14 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
   })
 
   if (missingPermissions.length > 0) {
-    return permissionBlockedRunResult(useCase, traceId, trace, target, permissions, missingPermissions)
+    return permissionBlockedRunResult(
+      useCase,
+      traceId,
+      trace,
+      target,
+      permissions,
+      missingPermissions,
+    )
   }
 
   if (adapter?.prepareUseCase) {
@@ -102,7 +116,13 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
     const description = queuedStep.description
     const stepIndex = executedStepIndex + 1
     executedStepIndex += 1
-    let plannedAction = createUseCaseAction(useCase.id, stepIndex, description, target, "mac-helper")
+    let plannedAction = createUseCaseAction(
+      useCase.id,
+      stepIndex,
+      description,
+      target,
+      "mac-helper",
+    )
 
     if (queuedStep.adaptive) {
       plannedAction = {
@@ -120,12 +140,26 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
     if (adapter?.bindActionInput) {
       plannedAction = adapter.bindActionInput(useCase, plannedAction)
     }
+    plannedAction = bindRuntimeSearchState(plannedAction, lastSearchQuery)
+
+    if (!currentObservation && requiresObservationBeforeAction(plannedAction)) {
+      pendingSteps.unshift(
+        {
+          description: "read app state before action",
+          adaptive: true,
+          originalExtractDescription: queuedStep.originalExtractDescription,
+        },
+        queuedStep,
+      )
+      executedStepIndex -= 1
+      continue
+    }
 
     let action = plannedAction
 
     // Use capability chain to bind element/coordinate or extract data
     if (currentObservation && canBindActionWithCapabilities(action)) {
-      const semanticHints = (adapter as any)?.semanticHints
+      const semanticHints = adapter?.semanticHints
       const { result: capResult, usedCapability } = await capabilityChain.execute(
         action,
         currentObservation,
@@ -138,11 +172,25 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
           element: capResult.element,
           input: {
             ...action.input,
-            ...(capResult.coordinate ? { x: capResult.coordinate.x, y: capResult.coordinate.y } : {}),
+            ...(capResult.coordinate
+              ? { x: capResult.coordinate.x, y: capResult.coordinate.y }
+              : {}),
             capabilityUsed: usedCapability,
             ...(action.kind === "extract" && capResult.metadata?.result
               ? { extractedData: JSON.stringify(capResult.metadata.result) }
               : {}),
+          },
+        }
+      } else if (action.kind === "extract") {
+        const capabilityMetadata = toJsonObject(capResult.metadata)
+        action = {
+          ...action,
+          input: {
+            ...action.input,
+            capabilityUsed: usedCapability,
+            capabilityFailure:
+              capResult.reason ?? "Capability chain did not produce extracted data.",
+            ...(capabilityMetadata ? { capabilityMetadata } : {}),
           },
         }
       }
@@ -171,6 +219,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
     if (policy.status !== "blocked") {
       firstActionRecorded = true
     }
+    lastSearchQuery = updateLastSearchQuery(action, result, lastSearchQuery)
 
     if (policy.status !== "blocked") {
       appendTraceEvent(trace, {
@@ -217,8 +266,13 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
       result,
     })
 
+    rememberNavigationAttempt(action, adaptiveState)
+
     if (canRetryPointClick(action, result, adaptiveState)) {
-      adaptiveState.clickRecoveryCounts.set(description, (adaptiveState.clickRecoveryCounts.get(description) ?? 0) + 1)
+      adaptiveState.clickRecoveryCounts.set(
+        description,
+        (adaptiveState.clickRecoveryCounts.get(description) ?? 0) + 1,
+      )
       pendingSteps.unshift(
         {
           description: "read app state before retrying click",
@@ -234,9 +288,29 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
       continue
     }
 
+    if (currentObservation && canContinueAfterTargetStateFailure(action, result)) {
+      const followUp = planTargetStateFollowUp(
+        action,
+        description,
+        currentObservation,
+        adaptiveState,
+        result,
+      )
+
+      if (followUp) {
+        pendingSteps.unshift(...followUp)
+        continue
+      }
+    }
+
     if (currentObservation && canContinueAfterExtractFailure(action, result)) {
       const originalExtractDescription = queuedStep.originalExtractDescription ?? description
-      const followUp = planExtractFollowUp(originalExtractDescription, currentObservation, adaptiveState)
+      const followUp = planExtractFollowUp(
+        originalExtractDescription,
+        currentObservation,
+        adaptiveState,
+        result,
+      )
 
       if (followUp) {
         pendingSteps.unshift(...followUp)
@@ -281,6 +355,10 @@ function createPolicyBlockedResult(action: Action, policy: PolicyDecision): Acti
   }
 }
 
+function requiresObservationBeforeAction(action: Action): boolean {
+  return canBindActionWithCapabilities(action) || action.kind === "scroll"
+}
+
 function canBindActionWithCapabilities(action: Action): boolean {
   return (
     action.kind === "click" ||
@@ -307,7 +385,34 @@ function canContinueAfterExtractFailure(action: Action, result: ActionResult): b
   )
 }
 
-function canRetryPointClick(action: Action, result: ActionResult, adaptiveState: AdaptiveRunState): boolean {
+function canContinueAfterTargetStateFailure(action: Action, result: ActionResult): boolean {
+  if ((action.kind !== "observe" && action.kind !== "click") || result.status !== "failed") {
+    return false
+  }
+
+  const targetState = failedTargetState(result)
+  if (
+    targetState?.kind === "search-results-loaded" &&
+    typeof targetState.keyword === "string" &&
+    targetState.keyword.trim() === ""
+  ) {
+    return false
+  }
+
+  const message = result.error?.message.toLowerCase() ?? ""
+  return message.includes("target state was not reached")
+}
+
+function failedTargetState(result: ActionResult): JsonObject | undefined {
+  const targetState = result.metadata?.targetState
+  return isJsonObject(targetState) ? targetState : undefined
+}
+
+function canRetryPointClick(
+  action: Action,
+  result: ActionResult,
+  adaptiveState: AdaptiveRunState,
+): boolean {
   if (action.kind !== "click" || result.status !== "failed") {
     return false
   }
@@ -326,46 +431,190 @@ function planExtractFollowUp(
   originalExtractDescription: string,
   observation: Observation,
   adaptiveState: AdaptiveRunState,
+  result: ActionResult,
 ): QueuedUseCaseStep[] | undefined {
   const retries = adaptiveState.extractRetryCounts.get(originalExtractDescription) ?? 0
   if (retries >= MAX_ADAPTIVE_EXTRACT_RETRIES) {
     return undefined
   }
 
-  if (wantsAlbumResult(originalExtractDescription) && !adaptiveState.triedTargets.has("tab:专辑")) {
-    adaptiveState.extractRetryCounts.set(originalExtractDescription, retries + 1)
-    adaptiveState.triedTargets.add("tab:专辑")
+  if (adaptiveState.lastRecoveryDescription?.startsWith("click item named ")) {
+    const key = `confirm-selection:${adaptiveState.lastRecoveryDescription}`
+    if (!adaptiveState.triedTargets.has(key)) {
+      adaptiveState.extractRetryCounts.set(originalExtractDescription, retries + 1)
+      adaptiveState.triedTargets.add(key)
+      adaptiveState.lastRecoveryDescription = "press key Enter"
 
-    return [
-      {
-        description: "click tab named 专辑",
-        adaptive: true,
-        originalExtractDescription,
-      },
-      {
-        description: "read app state after adaptive navigation",
-        adaptive: true,
-        originalExtractDescription,
-      },
-      {
-        description: originalExtractDescription,
-        adaptive: true,
-        originalExtractDescription,
-      },
-    ]
+      return extractRetrySteps("press key Enter", originalExtractDescription)
+    }
   }
 
-  const candidate = rankedExplorationCandidates(observation, adaptiveState).at(0)
+  const candidate = extractionRecoveryCandidates(
+    originalExtractDescription,
+    observation,
+    failureText(result),
+  ).find(
+    (entry) =>
+      !adaptiveState.triedTargets.has(entry.key) &&
+      !adaptiveState.triedNavigationDescriptions.has(normalizeDescription(entry.description)),
+  )
   if (!candidate) {
     return undefined
   }
 
   adaptiveState.extractRetryCounts.set(originalExtractDescription, retries + 1)
   adaptiveState.triedTargets.add(candidate.key)
+  adaptiveState.lastRecoveryDescription = candidate.description
+
+  return extractRetrySteps(candidate.description, originalExtractDescription)
+}
+
+function planTargetStateFollowUp(
+  action: Action,
+  failedStateDescription: string,
+  observation: Observation,
+  adaptiveState: AdaptiveRunState,
+  result: ActionResult,
+): QueuedUseCaseStep[] | undefined {
+  const retries = adaptiveState.extractRetryCounts.get(failedStateDescription) ?? 0
+  if (retries >= MAX_ADAPTIVE_EXTRACT_RETRIES) {
+    return undefined
+  }
+
+  const candidate = extractionRecoveryCandidates(
+    failedStateDescription,
+    observation,
+    failureText(result),
+  ).find(
+    (entry) =>
+      !adaptiveState.triedTargets.has(entry.key) &&
+      !adaptiveState.triedNavigationDescriptions.has(normalizeDescription(entry.description)),
+  )
+  if (!candidate) {
+    return undefined
+  }
+
+  adaptiveState.extractRetryCounts.set(failedStateDescription, retries + 1)
+  adaptiveState.triedTargets.add(candidate.key)
+  adaptiveState.lastRecoveryDescription = candidate.description
+
+  const navigationSteps: QueuedUseCaseStep[] = [
+    {
+      description: candidate.description,
+      adaptive: true,
+    },
+    {
+      description: "read app state after adaptive navigation",
+      adaptive: true,
+    },
+  ]
+
+  if (action.kind === "click") {
+    return navigationSteps
+  }
 
   return [
+    ...navigationSteps,
     {
-      description: `click item named ${candidate.name}`,
+      description: failedStateDescription,
+      adaptive: true,
+    },
+  ]
+}
+
+function rememberNavigationAttempt(action: Action, adaptiveState: AdaptiveRunState): void {
+  const description = stringInput(action, "description", "")
+  if (!isNavigationAttempt(action, description)) {
+    return
+  }
+
+  adaptiveState.triedNavigationDescriptions.add(normalizeDescription(description))
+}
+
+function isNavigationAttempt(action: Action, description: string): boolean {
+  const normalized = normalizeDescription(description)
+  if (action.kind === "scroll") {
+    return true
+  }
+
+  if (action.kind === "key") {
+    const key = stringInput(action, "key", "")
+    return /^(enter|pagedown|pageup|arrowdown|arrowup|arrowleft|arrowright)$/i.test(key)
+  }
+
+  if (action.kind !== "click") {
+    return false
+  }
+
+  return (
+    normalized.includes("click tab named") ||
+    normalized.includes("click item named") ||
+    normalized.includes("click result named") ||
+    normalized.includes("click link named") ||
+    normalized.includes("click button named")
+  )
+}
+
+function normalizeDescription(description: string): string {
+  return description.trim().toLowerCase().replace(/\s+/g, " ")
+}
+
+function bindRuntimeSearchState(action: Action, lastSearchQuery: string | undefined): Action {
+  const state = action.input?.targetState
+  if (!isJsonObject(state) || state.kind !== "search-results-loaded") {
+    return action
+  }
+
+  if (!lastSearchQuery) {
+    return action
+  }
+
+  return {
+    ...action,
+    input: {
+      ...action.input,
+      targetState: {
+        ...state,
+        keyword: lastSearchQuery,
+      },
+    },
+  }
+}
+
+function updateLastSearchQuery(
+  action: Action,
+  result: ActionResult,
+  previous: string | undefined,
+): string | undefined {
+  if (!result.ok || action.kind !== "type") {
+    return previous
+  }
+
+  const description = normalizeDescription(stringInput(action, "description", ""))
+  if (!description.includes("search")) {
+    return previous
+  }
+
+  const text = stringInput(action, "text", "")
+  return text || previous
+}
+
+function failureText(result: ActionResult): string {
+  return [
+    result.error?.message,
+    typeof result.metadata?.extractedData === "string" ? result.metadata.extractedData : undefined,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join("\n")
+}
+
+function extractRetrySteps(
+  navigationDescription: string,
+  originalExtractDescription: string,
+): QueuedUseCaseStep[] {
+  return [
+    {
+      description: navigationDescription,
       adaptive: true,
       originalExtractDescription,
     },
@@ -380,166 +629,6 @@ function planExtractFollowUp(
       originalExtractDescription,
     },
   ]
-}
-
-function wantsAlbumResult(description: string): boolean {
-  const normalized = normalize(description)
-  return normalized.includes("album") || normalized.includes("专辑")
-}
-
-function rankedExplorationCandidates(
-  observation: Observation,
-  adaptiveState: AdaptiveRunState,
-): Array<{ key: string; name: string; score: number }> {
-  return observation.elements
-    .filter((element) => element.name && isVisibleElement(element, observation))
-    .map((element) => {
-      const name = element.name ?? ""
-      const key = elementKey(element)
-
-      return {
-        key,
-        name,
-        score: explorationScore(element),
-      }
-    })
-    .filter((candidate) => candidate.score > 0 && !adaptiveState.triedTargets.has(candidate.key))
-    .sort((left, right) => right.score - left.score)
-}
-
-function explorationScore(element: Observation["elements"][number]): number {
-  const role = normalize(element.role)
-  const name = (element.name ?? "").trim()
-  const normalizedName = normalize(name)
-
-  if (!name || isChromeOrPlaybackLabel(normalizedName)) {
-    return -100
-  }
-
-  let score = 0
-  if (role.includes("link")) {
-    score += 35
-  }
-  if (role.includes("button")) {
-    score += 25
-  }
-  if (role.includes("row") || role.includes("cell")) {
-    score += 25
-  }
-  if (role.includes("tab") || role.includes("heading")) {
-    score += 15
-  }
-  if (score === 0) {
-    return -100
-  }
-
-  if (containsDateLikeText(name)) {
-    score += 30
-  }
-  if (looksLikeDetailOrListTarget(normalizedName)) {
-    score += 15
-  }
-  if (name.length > 1 && name.length <= 120) {
-    score += 5
-  }
-  if (normalizedName.includes("播放") || normalizedName.includes("play")) {
-    score -= 20
-  }
-
-  return score
-}
-
-function looksLikeDetailOrListTarget(normalizedName: string): boolean {
-  return [
-    "专辑",
-    "album",
-    "详情",
-    "detail",
-    "更多",
-    "more",
-    "全部",
-    "all",
-    "查看",
-    "view",
-    "列表",
-    "list",
-    "结果",
-    "result",
-    "下一",
-    "next",
-  ].some((token) => normalizedName.includes(token))
-}
-
-function isChromeOrPlaybackLabel(normalizedName: string): boolean {
-  return [
-    "关闭",
-    "最小化",
-    "全屏",
-    "搜索",
-    "刷新",
-    "上一步",
-    "下一步",
-    "上一首",
-    "下一首",
-    "暂停播放",
-    "播放列表",
-    "评论",
-    "更多操作",
-    "添加到我喜欢",
-    "close",
-    "minimize",
-    "fullscreen",
-    "search",
-    "refresh",
-  ].includes(normalizedName)
-}
-
-function isVisibleElement(element: Observation["elements"][number], observation: Observation): boolean {
-  const frame = element.metadata?.frame
-  if (!isJsonObject(frame)) {
-    return true
-  }
-
-  const x = typeof frame.x === "number" ? frame.x : 0
-  const y = typeof frame.y === "number" ? frame.y : 0
-  const width = typeof frame.width === "number" ? frame.width : 0
-  const height = typeof frame.height === "number" ? frame.height : 0
-  const screenWidth = observation.coordinateSpace?.screenWidth
-  const screenHeight = observation.coordinateSpace?.screenHeight
-
-  if (width <= 0 || height <= 0) {
-    return false
-  }
-
-  if (typeof screenWidth === "number" && typeof screenHeight === "number") {
-    return x + width > 0 && y + height > 0 && x < screenWidth && y < screenHeight
-  }
-
-  return true
-}
-
-function elementKey(element: Observation["elements"][number]): string {
-  const frame = element.metadata?.frame
-  if (isJsonObject(frame)) {
-    return [
-      element.role ?? "",
-      element.name ?? "",
-      frame.x ?? "",
-      frame.y ?? "",
-      frame.width ?? "",
-      frame.height ?? "",
-    ].join("|")
-  }
-
-  return [element.role ?? "", element.name ?? ""].join("|")
-}
-
-function normalize(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : ""
-}
-
-function containsDateLikeText(value: string): boolean {
-  return /\b\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?\b/.test(value)
 }
 
 function permissionBlockedRunResult(
@@ -624,7 +713,7 @@ async function executeNativeAction(
   if (action.kind === "extract") {
     // Extract action is handled by capability chain
     const extractedData = action.input?.extractedData
-    const failure = extractFailure(extractedData)
+    const failure = extractFailure(action, extractedData)
 
     return {
       result: {
@@ -634,6 +723,15 @@ async function executeNativeAction(
         adapter: "mac-helper",
         metadata: {
           helperMethod: "extract",
+          extractionContract: {
+            requiredFields: extractionContractFromAction(action).requiredFields,
+          },
+          ...(typeof action.input?.capabilityFailure === "string"
+            ? { capabilityFailure: action.input.capabilityFailure }
+            : {}),
+          ...(action.input?.capabilityMetadata
+            ? { capabilityMetadata: action.input.capabilityMetadata }
+            : {}),
           ...(extractedData ? { extractedData } : {}),
         },
         ...(failure
@@ -676,7 +774,9 @@ async function executeNativeAction(
   }
 
   if (action.kind === "key") {
-    const call = await measureActionCall(action, () => helper.key({ action, key: stringInput(action, "key", "Enter") }))
+    const call = await measureActionCall(action, () =>
+      helper.key({ action, key: stringInput(action, "key", "Enter") }),
+    )
     return observeAfterAction(helper, action, call, "key", previousObservation)
   }
 
@@ -722,7 +822,9 @@ async function executeNativeAction(
   }
 }
 
-async function measureAsync<T>(operation: () => Promise<T>): Promise<{ value: T; latencyMs: number }> {
+async function measureAsync<T>(
+  operation: () => Promise<T>,
+): Promise<{ value: T; latencyMs: number }> {
   const startedAt = Date.now()
   const value = await operation()
 
@@ -779,7 +881,9 @@ function stringInput(action: Action, key: string, fallback: string): string {
 
 function scrollDirectionInput(action: Action): "up" | "down" | "left" | "right" {
   const value = stringInput(action, "direction", "down")
-  return value === "up" || value === "down" || value === "left" || value === "right" ? value : "down"
+  return value === "up" || value === "down" || value === "left" || value === "right"
+    ? value
+    : "down"
 }
 
 function numberInput(action: Action, key: string, fallback: number): number {
@@ -787,9 +891,13 @@ function numberInput(action: Action, key: string, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback
 }
 
-function extractFailure(extractedData: unknown): string | undefined {
+function extractFailure(action: Action, extractedData: unknown): string | undefined {
   if (typeof extractedData !== "string" || extractedData.trim() === "") {
-    return "Extract action did not produce structured data."
+    const capabilityFailure =
+      typeof action.input?.capabilityFailure === "string"
+        ? action.input.capabilityFailure
+        : undefined
+    return capabilityFailure ?? "Extract action did not produce structured data."
   }
 
   let parsed: unknown
@@ -804,26 +912,48 @@ function extractFailure(extractedData: unknown): string | undefined {
   }
 
   const status = typeof parsed.status === "string" ? parsed.status.toLowerCase() : undefined
-  if (status && (status.includes("no_") || status.includes("not_found") || status.includes("failed"))) {
+  if (
+    status &&
+    (status.includes("no_") || status.includes("not_found") || status.includes("failed"))
+  ) {
     return `Extract action failed semantically: ${parsed.status}.`
   }
 
-  const hasAlbumName = typeof parsed.albumName === "string" && parsed.albumName.trim() !== ""
-  const hasArtist = typeof parsed.artist === "string" && parsed.artist.trim() !== ""
-  const hasReleaseDate =
-    (typeof parsed.releaseDate === "string" && parsed.releaseDate.trim() !== "") ||
-    (typeof parsed.releaseYear === "string" && parsed.releaseYear.trim() !== "") ||
-    (typeof parsed.releaseInfo === "string" && parsed.releaseInfo.trim() !== "")
-
-  if (!hasAlbumName || !hasArtist || !hasReleaseDate) {
-    return "Extract action did not return albumName, artist, and release date fields."
+  const missing = missingRequiredFields(parsed, extractionContractFromAction(action))
+  if (missing.length > 0) {
+    return `Extract action did not return required fields: ${missing.join(", ")}.`
   }
 
   return undefined
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
+function toJsonObject(value: unknown): JsonObject | undefined {
+  return isJsonObject(value) ? value : undefined
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false
+  }
+
+  return Object.values(value).every(isJsonValue)
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) {
+    return true
+  }
+
+  const valueType = typeof value
+  if (valueType === "string" || valueType === "number" || valueType === "boolean") {
+    return true
+  }
+
+  if (Array.isArray(value)) {
+    return value.every(isJsonValue)
+  }
+
+  return isJsonObject(value)
 }
 
 function withPolicy(result: ActionResult, policy: PolicyDecision): ActionResult {

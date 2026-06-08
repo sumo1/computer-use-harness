@@ -13,11 +13,12 @@ export class CoordinateClicker implements Capability {
       return false
     }
 
+    if (requiresSemanticElementTarget(action)) {
+      return false
+    }
+
     // Check if action already has coordinates
-    if (
-      typeof action.input?.x === "number" &&
-      typeof action.input?.y === "number"
-    ) {
+    if (typeof action.input?.x === "number" && typeof action.input?.y === "number") {
       return true
     }
 
@@ -40,10 +41,7 @@ export class CoordinateClicker implements Capability {
     hints?: SemanticHints,
   ): Promise<CapabilityResult> {
     // Use existing coordinates if available
-    if (
-      typeof action.input?.x === "number" &&
-      typeof action.input?.y === "number"
-    ) {
+    if (typeof action.input?.x === "number" && typeof action.input?.y === "number") {
       return {
         success: true,
         coordinate: { x: action.input.x, y: action.input.y },
@@ -86,11 +84,7 @@ export class CoordinateClicker implements Capability {
 
     if (refElement) {
       const frame = refElement.metadata?.frame
-      if (
-        isRecord(frame) &&
-        typeof frame.x === "number" &&
-        typeof frame.y === "number"
-      ) {
+      if (isRecord(frame) && typeof frame.x === "number" && typeof frame.y === "number") {
         return {
           x: frame.x + hint.x,
           y: frame.y + hint.y,
@@ -127,6 +121,11 @@ function frameArea(value: unknown): number {
   }
 
   return value.width * value.height
+}
+
+function requiresSemanticElementTarget(action: Action): boolean {
+  const description = stringInput(action, "description", "")
+  return /\b(?:click|hover)\s+tab\s+named\b/i.test(description)
 }
 
 function canUseCoordinateTarget(kind: Action["kind"]): boolean {

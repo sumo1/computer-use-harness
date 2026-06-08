@@ -2,6 +2,7 @@ import type { Action, ActionKind, Target, TraceEvent } from "../core/contracts.j
 import type { UseCase } from "./types.js"
 
 const ACTION_KIND_PATTERNS: Array<{ token: string; kind: ActionKind }> = [
+  { token: "observe", kind: "observe" },
   { token: "extract", kind: "extract" },
   { token: "set value", kind: "type" },
   { token: "type", kind: "type" },
@@ -80,6 +81,15 @@ function normalizePlatform(platform: string | undefined): Target["platform"] {
 
 function inferActionKind(description: string): ActionKind {
   const normalized = description.toLowerCase()
+  if (
+    normalized.startsWith("read app state") ||
+    normalized.startsWith("read state") ||
+    normalized.startsWith("wait for") ||
+    normalized.startsWith("wait until")
+  ) {
+    return "observe"
+  }
+
   const match = ACTION_KIND_PATTERNS.find((entry) => normalized.includes(entry.token))
   return match?.kind ?? "observe"
 }
@@ -96,6 +106,7 @@ function createActionInput(description: string): Action["input"] {
     ...retryInput(description),
     ...findResultInput(description),
     ...namedClickInput(description),
+    ...targetStateInput(description),
     ...extractInput(description),
   }
 }
@@ -129,7 +140,7 @@ function coordinateInput(description: string): Record<string, number> {
   const xyPattern = /(?:at|coordinates?)\s*(?:\()?(\d+)\s*,\s*(\d+)(?:\))?/i
   const explicitPattern = /x:\s*(\d+)\s*,?\s*y:\s*(\d+)/i
 
-  let match = description.match(xyPattern) ?? description.match(explicitPattern)
+  const match = description.match(xyPattern) ?? description.match(explicitPattern)
 
   if (match?.[1] && match?.[2]) {
     return {
@@ -143,11 +154,13 @@ function coordinateInput(description: string): Record<string, number> {
 
 function dragInput(description: string): Record<string, number> {
   // Match patterns like "from 100, 200 to 300, 400" or "fromX: 100, fromY: 200, toX: 300, toY: 400"
-  const fromToPattern = /from\s*(?:\()?(\d+)\s*,\s*(\d+)(?:\))?\s*to\s*(?:\()?(\d+)\s*,\s*(\d+)(?:\))?/i
-  const explicitPattern = /fromX:\s*(\d+)\s*,?\s*fromY:\s*(\d+)\s*,?\s*toX:\s*(\d+)\s*,?\s*toY:\s*(\d+)/i
+  const fromToPattern =
+    /from\s*(?:\()?(\d+)\s*,\s*(\d+)(?:\))?\s*to\s*(?:\()?(\d+)\s*,\s*(\d+)(?:\))?/i
+  const explicitPattern =
+    /fromX:\s*(\d+)\s*,?\s*fromY:\s*(\d+)\s*,?\s*toX:\s*(\d+)\s*,?\s*toY:\s*(\d+)/i
   const deltaPattern = /(?:by|delta)\s*(?:\()?(-?\d+)\s*,\s*(-?\d+)(?:\))?/i
 
-  let match = description.match(fromToPattern) ?? description.match(explicitPattern)
+  const match = description.match(fromToPattern) ?? description.match(explicitPattern)
 
   if (match?.[1] && match?.[2] && match?.[3] && match?.[4]) {
     return {
@@ -206,11 +219,54 @@ function namedClickInput(description: string): Record<string, string> {
   return match?.[1] ? { keyword: match[1].trim() } : {}
 }
 
-function extractInput(description: string): Record<string, string> {
+function targetStateInput(description: string): Record<string, { kind: string; keyword: string }> {
+  const tabMatch = description.match(/\bclick\s+tab\s+named\s+(.+)$/i)
+  if (tabMatch?.[1]) {
+    return {
+      targetState: {
+        kind: "tab-activated",
+        keyword: tabMatch[1].trim(),
+      },
+    }
+  }
+
+  const searchMatch = description.match(/\bwait\s+for\s+search\s+results?\s+(?:to\s+)?load/i)
+  if (searchMatch) {
+    return {
+      targetState: {
+        kind: "search-results-loaded",
+        keyword: "",
+      },
+    }
+  }
+
+  return {}
+}
+
+function extractInput(description: string): Record<string, string | string[]> {
   // Match "extract <something> information"
   const match = description.match(/\bextract\s+(.+)$/i)
   if (match?.[1]) {
-    return { query: `Extract ${match[1].trim()}. Return JSON with relevant fields.` }
+    return {
+      query: `Extract ${match[1].trim()}. Return JSON with relevant fields.`,
+      ...extractionFieldsInput(description),
+    }
   }
   return {}
+}
+
+function extractionFieldsInput(description: string): Record<string, string[]> {
+  const match = description.match(/\breturn\s+(.+?)(?:[.;；。]|$)/i)
+  const clause = match?.[1]?.trim()
+  if (!clause) {
+    return {}
+  }
+
+  const fields = clause
+    .split(/[\s,，、]+/)
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0)
+    .filter((field) => /[\p{L}\p{N}]/u.test(field))
+
+  return fields.length > 0 ? { extractionFields: fields } : {}
 }

@@ -85,14 +85,24 @@ export class AXElementFinder implements Capability {
     }
   }
 
-  private findByKeyword(elements: ElementRef[], keyword: string, action: Action): ElementRef | undefined {
+  private findByKeyword(
+    elements: ElementRef[],
+    keyword: string,
+    action: Action,
+  ): ElementRef | undefined {
     const normalizedKeyword = normalize(keyword)
     if (!normalizedKeyword) {
       return undefined
     }
 
     const visibleCandidates = this.visibleNonMenuElements(elements)
-    const candidates = this.rankCandidates(visibleCandidates, normalizedKeyword, action)
+    const candidates = this.rankCandidates(
+      visibleCandidates.filter((element) =>
+        this.matchesSemanticTarget(element, action, visibleCandidates),
+      ),
+      normalizedKeyword,
+      action,
+    )
 
     return (
       candidates.find((element) => this.isPressableRole(normalize(element.role))) ??
@@ -137,11 +147,110 @@ export class AXElementFinder implements Capability {
   }
 
   private isPressableRole(role: string): boolean {
-    return role.includes("button") || role.includes("row") || role.includes("cell") || role.includes("link")
+    return (
+      role.includes("button") ||
+      role.includes("按钮") ||
+      role.includes("row") ||
+      role.includes("行") ||
+      role.includes("cell") ||
+      role.includes("单元格") ||
+      role.includes("link") ||
+      role.includes("链接")
+    )
+  }
+
+  private matchesSemanticTarget(
+    element: ElementRef,
+    action: Action,
+    visibleElements: ElementRef[],
+  ): boolean {
+    const role = elementSemanticRole(element)
+    const targetKind = actionTargetKind(action)
+
+    if (targetKind === "tab") {
+      return this.isLikelyTabCandidate(element, visibleElements)
+    }
+
+    if (targetKind === "button") {
+      return role.includes("button") || role.includes("按钮")
+    }
+
+    if (targetKind === "link") {
+      return role.includes("link") || role.includes("链接")
+    }
+
+    if (targetKind === "item" || targetKind === "result") {
+      return this.isPressableRole(role)
+    }
+
+    return !role.includes("statictext") && role !== "text" && !role.includes("文本")
+  }
+
+  private isLikelyTabCandidate(element: ElementRef, visibleElements: ElementRef[]): boolean {
+    const role = elementSemanticRole(element)
+    const name = normalize(element.name)
+    if (!name || !isTabControlRole(role) || isColumnLike(element)) {
+      return false
+    }
+
+    if (role.includes("statictext") || role === "text" || role.includes("文本")) {
+      return false
+    }
+
+    if (name.length > 40) {
+      return false
+    }
+
+    if (
+      role.includes("tab") ||
+      role.includes("segmented") ||
+      role.includes("radio") ||
+      role.includes("toggle")
+    ) {
+      return true
+    }
+
+    return (
+      (role.includes("button") || role.includes("按钮")) &&
+      this.hasLikelyTabPeer(element, visibleElements)
+    )
+  }
+
+  private hasLikelyTabPeer(element: ElementRef, visibleElements: ElementRef[]): boolean {
+    const frame = elementFrame(element)
+    if (!frame) {
+      return false
+    }
+
+    const centerY = frame.y + frame.height / 2
+    return visibleElements.some((peer) => {
+      if (peer.id === element.id || normalize(peer.name) === normalize(element.name)) {
+        return false
+      }
+
+      const peerRole = elementSemanticRole(peer)
+      const peerName = normalize(peer.name)
+      const peerFrame = elementFrame(peer)
+      if (!peerName || peerName.length > 40 || !peerFrame || isColumnLike(peer)) {
+        return false
+      }
+
+      if (
+        !isTabControlRole(peerRole) ||
+        peerRole.includes("statictext") ||
+        peerRole === "text" ||
+        peerRole.includes("文本")
+      ) {
+        return false
+      }
+
+      const peerCenterY = peerFrame.y + peerFrame.height / 2
+      return Math.abs(centerY - peerCenterY) <= Math.max(24, frame.height, peerFrame.height)
+    })
   }
 
   private rankCandidates(elements: ElementRef[], keyword: string, action: Action): ElementRef[] {
-    const namedTab = normalize(stringInput(action, "description", "")).includes("click tab named")
+    const namedTab = actionTargetKind(action) === "tab"
     const exact = elements.filter((element) => normalize(element.name) === keyword)
     if (exact.length > 0) {
       return exact
@@ -179,6 +288,82 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function elementFrame(
+  element: ElementRef,
+): { x: number; y: number; width: number; height: number } | undefined {
+  const frame = element.metadata?.frame
+  if (!isRecord(frame)) {
+    return undefined
+  }
+
+  const { x, y, width, height } = frame
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof width !== "number" ||
+    typeof height !== "number"
+  ) {
+    return undefined
+  }
+
+  return { x, y, width, height }
+}
+
+function isColumnLike(element: ElementRef): boolean {
+  return elementSemanticParts(element).some(
+    (value) => value.includes("column") || value.includes("header") || value.includes("列"),
+  )
+}
+
+function elementSemanticRole(element: ElementRef): string {
+  return elementSemanticParts(element).join(" ")
+}
+
+function elementSemanticParts(element: ElementRef): string[] {
+  return [
+    element.role,
+    element.metadata?.roleDescription,
+    element.metadata?.subrole,
+    element.metadata?.axIdentifier,
+  ]
+    .map(normalize)
+    .filter(Boolean)
+}
+
+function actionTargetKind(
+  action: Action,
+): "tab" | "button" | "link" | "item" | "result" | undefined {
+  const description = normalize(stringInput(action, "description", ""))
+  const match = description.match(
+    /\b(?:click|hover)\s+(tab|button|link|item|result|row|cell)\s+named\b/,
+  )
+  const kind = match?.[1]
+
+  if (kind === "row" || kind === "cell") {
+    return "item"
+  }
+
+  return kind as ReturnType<typeof actionTargetKind>
+}
+
+function isTabControlRole(role: string): boolean {
+  return (
+    role.includes("tab") ||
+    role.includes("button") ||
+    role.includes("按钮") ||
+    role.includes("radio") ||
+    role.includes("segmented") ||
+    role.includes("toggle") ||
+    role.includes("标签")
+  )
+}
+
 function canUseElementTarget(kind: Action["kind"]): boolean {
-  return kind === "click" || kind === "secondary-click" || kind === "hover" || kind === "drag" || kind === "type"
+  return (
+    kind === "click" ||
+    kind === "secondary-click" ||
+    kind === "hover" ||
+    kind === "drag" ||
+    kind === "type"
+  )
 }

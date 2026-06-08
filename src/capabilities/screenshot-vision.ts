@@ -88,29 +88,33 @@ Return ONLY valid JSON (no markdown), for example:
 
 If the required fields are not present in either the screenshot or accessibility context, return: {"status": "no_album_info_found", "reason": "describe the missing fields and visible candidates"}`
 
-    const response = await this.anthropic.messages.create({
-      model: "claude-opus-4-8",
-      max_tokens: 2048,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: "image/png",
-                data: screenshot.data,
+    const response = await withTimeout(
+      this.anthropic.messages.create({
+        model: "claude-opus-4-8",
+        max_tokens: 2048,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: screenshot.data,
+                },
               },
-            },
-            {
-              type: "text",
-              text: prompt,
-            },
-          ],
-        },
-      ],
-    })
+              {
+                type: "text",
+                text: prompt,
+              },
+            ],
+          },
+        ],
+      }),
+      45_000,
+      "Timed out extracting structured data from screenshot.",
+    )
 
     const textContent = response.content.find((c) => c.type === "text")
     if (!textContent || textContent.type !== "text") {
@@ -143,16 +147,20 @@ Return ONLY valid JSON (no markdown), for example:
 
 If the required fields are not present, return: {"status": "no_album_info_found", "availableInfo": "describe the missing fields and visible candidates"}`
 
-    const response = await this.anthropic.messages.create({
-      model: "claude-opus-4-8",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-    })
+    const response = await withTimeout(
+      this.anthropic.messages.create({
+        model: "claude-opus-4-8",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+      }),
+      45_000,
+      "Timed out extracting structured data from accessibility context.",
+    )
 
     const textContent = response.content.find((c) => c.type === "text")
     if (!textContent || textContent.type !== "text") {
@@ -317,4 +325,17 @@ function containsDateLikeText(value: string): boolean {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)]
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout)
+    }
+  })
 }

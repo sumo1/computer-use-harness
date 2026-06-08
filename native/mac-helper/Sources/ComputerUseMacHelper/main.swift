@@ -521,7 +521,9 @@ private func collectAXElement(
         return
     }
 
-    if let snapshot = axElementSnapshot(element: element, target: target, app: app, path: path) {
+    let shouldRecordSnapshot = !(depth > 0 && role == kAXApplicationRole)
+    if shouldRecordSnapshot,
+       let snapshot = axElementSnapshot(element: element, target: target, app: app, path: path) {
         elements.append(snapshot)
     }
 
@@ -965,6 +967,15 @@ private func performType(action: [String: Any], actionId: String, method: String
         )
     }
 
+    let valueSetError = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+    if valueSetError == .success, qqMusicSearchContains(element, text: text) {
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["text": text, "inputMethod": "qqmusic-ax-value"]
+        )
+    }
+
     activateTargetApp(app)
     let focusedByMouse = clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
 
@@ -979,21 +990,75 @@ private func performType(action: [String: Any], actionId: String, method: String
     }
 
     usleep(200_000)
+    let inputElement = findQQMusicSearchElement(app: app) ?? element
+    focusElement(inputElement)
 
-    guard pasteTextToPid(app.processIdentifier, text: text) else {
-        return failedActionResult(
+    _ = clickElementTextEntryPointToHidWhenFrontmost(inputElement, pid: app.processIdentifier) ||
+        clickElementCenterToHidWhenFrontmost(inputElement, pid: app.processIdentifier)
+    usleep(200_000)
+
+    _ = postKeyboardShortcutToHidWhenFrontmost(app.processIdentifier, keyCode: 0)
+    usleep(100_000)
+
+    if sendTextToHidWhenFrontmost(app.processIdentifier, text: text),
+       qqMusicSearchContains(inputElement, text: text) {
+        return passedActionResult(
             actionId: actionId,
             method: method,
-            code: "ACTION_FAILED",
-            message: "Unable to paste text into QQ Music search element.",
-            details: ["role": axString(element, kAXRoleAttribute) ?? "unknown"]
+            metadata: ["text": text, "inputMethod": "qqmusic-hid-unicode"]
         )
     }
 
-    return passedActionResult(
+    if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text),
+       qqMusicSearchContains(inputElement, text: text) {
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["text": text, "inputMethod": "qqmusic-hid-paste"]
+        )
+    }
+
+    if pasteTextToPid(app.processIdentifier, text: text),
+       qqMusicSearchContains(inputElement, text: text) {
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["text": text, "inputMethod": "qqmusic-pid-paste"]
+        )
+    }
+
+    if let refreshedInputElement = findQQMusicSearchElement(app: app),
+       clickElementTextEntryPointToHidWhenFrontmost(refreshedInputElement, pid: app.processIdentifier) {
+        usleep(200_000)
+
+        _ = postKeyboardShortcutToHidWhenFrontmost(app.processIdentifier, keyCode: 0)
+        usleep(100_000)
+
+        if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text),
+           qqMusicSearchContains(refreshedInputElement, text: text) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "qqmusic-hid-paste-entry-point"]
+            )
+        }
+
+        if pasteTextToPid(app.processIdentifier, text: text),
+           qqMusicSearchContains(refreshedInputElement, text: text) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "qqmusic-pid-paste-entry-point"]
+            )
+        }
+    }
+
+    return failedActionResult(
         actionId: actionId,
         method: method,
-        metadata: ["text": text, "inputMethod": "qqmusic-pid-paste"]
+        code: "ACTION_FAILED",
+        message: "Unable to paste text into QQ Music search element.",
+        details: ["role": axString(element, kAXRoleAttribute) ?? "unknown"]
     )
 }
 
@@ -1430,6 +1495,94 @@ private func isQQMusicSearchElement(_ element: AXUIElement) -> Bool {
     return role == "AXUnknown" && name == "搜索"
 }
 
+private func findQQMusicSearchElement(app: NSRunningApplication) -> AXUIElement? {
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+
+    return findAXElement(root, maxDepth: maxAXDepth, maxCount: maxAXElements) { element in
+        guard isQQMusicSearchElement(element),
+              let frame = axFrame(element),
+              let width = frame["width"] as? CGFloat,
+              let height = frame["height"] as? CGFloat
+        else {
+            return false
+        }
+
+        return width > 0 && height > 0
+    }
+}
+
+private func findAXElement(
+    _ element: AXUIElement,
+    depth: Int = 0,
+    visitedCount: inout Int,
+    maxDepth: Int,
+    maxCount: Int,
+    matching predicate: (AXUIElement) -> Bool
+) -> AXUIElement? {
+    if visitedCount >= maxCount {
+        return nil
+    }
+
+    visitedCount += 1
+    if predicate(element) {
+        return element
+    }
+
+    guard depth < maxDepth, let children = axChildren(element) else {
+        return nil
+    }
+
+    for child in children {
+        if let match = findAXElement(
+            child,
+            depth: depth + 1,
+            visitedCount: &visitedCount,
+            maxDepth: maxDepth,
+            maxCount: maxCount,
+            matching: predicate
+        ) {
+            return match
+        }
+    }
+
+    return nil
+}
+
+private func findAXElement(
+    _ element: AXUIElement,
+    maxDepth: Int,
+    maxCount: Int,
+    matching predicate: (AXUIElement) -> Bool
+) -> AXUIElement? {
+    var visitedCount = 0
+
+    return findAXElement(
+        element,
+        visitedCount: &visitedCount,
+        maxDepth: maxDepth,
+        maxCount: maxCount,
+        matching: predicate
+    )
+}
+
+private func qqMusicSearchContains(_ element: AXUIElement, text: String) -> Bool {
+    let expected = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !expected.isEmpty else {
+        return true
+    }
+
+    let values = [
+        axString(element, kAXValueAttribute),
+        axString(element, kAXTitleAttribute),
+        axString(element, kAXDescriptionAttribute),
+        axString(element, "AXIdentifier"),
+    ]
+
+    return values.compactMap { nonEmptyString($0) }.contains { value in
+        value.contains(expected)
+    }
+}
+
 private func activateTargetApp(_ app: NSRunningApplication) {
     if let bundleURL = app.bundleURL {
         let configuration = NSWorkspace.OpenConfiguration()
@@ -1471,6 +1624,15 @@ private func clickElementCenterToHidWhenFrontmost(_ element: AXUIElement, pid: p
     return postMouseClickToHidWhenFrontmost(pid, point: point)
 }
 
+private func clickElementTextEntryPointToHidWhenFrontmost(_ element: AXUIElement, pid: pid_t) -> Bool {
+    guard let point = axElementTextEntryPoint(element)
+    else {
+        return false
+    }
+
+    return postMouseClickToHidWhenFrontmost(pid, point: point)
+}
+
 private func axElementCenter(_ element: AXUIElement) -> CGPoint? {
     guard let frame = axFrame(element),
           let x = frame["x"] as? CGFloat,
@@ -1484,6 +1646,25 @@ private func axElementCenter(_ element: AXUIElement) -> CGPoint? {
     }
 
     return CGPoint(x: x + width / 2, y: y + height / 2)
+}
+
+private func axElementTextEntryPoint(_ element: AXUIElement) -> CGPoint? {
+    guard let frame = axFrame(element),
+          let x = frame["x"] as? CGFloat,
+          let y = frame["y"] as? CGFloat,
+          let width = frame["width"] as? CGFloat,
+          let height = frame["height"] as? CGFloat,
+          width > 0,
+          height > 0
+    else {
+        return nil
+    }
+
+    let maxInset = max(width - 8, 0)
+    let preferredInset = max(width * 0.15, 12)
+    let inset = min(preferredInset, maxInset)
+
+    return CGPoint(x: x + inset, y: y + height / 2)
 }
 
 private func postMouseClickToPid(_ pid: pid_t, point: CGPoint) -> Bool {
@@ -1748,6 +1929,30 @@ private func pasteTextToPid(_ pid: pid_t, text: String) -> Bool {
     return posted
 }
 
+private func pasteTextToHidWhenFrontmost(_ pid: pid_t, text: String) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        return false
+    }
+
+    let pasteboard = NSPasteboard.general
+    let snapshot = PasteboardSnapshot.capture(pasteboard)
+
+    pasteboard.clearContents()
+    guard pasteboard.setString(text, forType: .string) else {
+        snapshot.restore(pasteboard)
+        return false
+    }
+
+    _ = postKeyboardShortcutToHidWhenFrontmost(pid, keyCode: 0)
+    usleep(100_000)
+
+    let posted = postKeyboardShortcutToHidWhenFrontmost(pid, keyCode: 9)
+    usleep(1_000_000)
+    snapshot.restore(pasteboard)
+
+    return posted
+}
+
 private func postKeyboardShortcutToPid(_ pid: pid_t, keyCode: CGKeyCode) -> Bool {
     guard
         let commandDown = CGEvent(keyboardEventSource: nil, virtualKey: 55, keyDown: true),
@@ -1765,6 +1970,31 @@ private func postKeyboardShortcutToPid(_ pid: pid_t, keyCode: CGKeyCode) -> Bool
     keyDown.postToPid(pid)
     keyUp.postToPid(pid)
     commandUp.postToPid(pid)
+
+    return true
+}
+
+private func postKeyboardShortcutToHidWhenFrontmost(_ pid: pid_t, keyCode: CGKeyCode) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        return false
+    }
+
+    guard
+        let commandDown = CGEvent(keyboardEventSource: nil, virtualKey: 55, keyDown: true),
+        let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+        let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false),
+        let commandUp = CGEvent(keyboardEventSource: nil, virtualKey: 55, keyDown: false)
+    else {
+        return false
+    }
+
+    keyDown.flags = .maskCommand
+    keyUp.flags = .maskCommand
+
+    commandDown.post(tap: .cghidEventTap)
+    keyDown.post(tap: .cghidEventTap)
+    keyUp.post(tap: .cghidEventTap)
+    commandUp.post(tap: .cghidEventTap)
 
     return true
 }
@@ -1829,6 +2059,35 @@ private func sendTextToPid(_ pid: pid_t, text: String) -> Bool {
         down.postToPid(pid)
         up.postToPid(pid)
         usleep(25_000)
+    }
+
+    return true
+}
+
+private func sendTextToHidWhenFrontmost(_ pid: pid_t, text: String) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        return false
+    }
+
+    let characters = Array(text.utf16)
+    guard !characters.isEmpty else {
+        return true
+    }
+
+    for character in characters {
+        var scalar = character
+        guard
+            let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+            let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        else {
+            return false
+        }
+
+        down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &scalar)
+        up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &scalar)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        usleep(50_000)
     }
 
     return true
@@ -1984,6 +2243,8 @@ private func macKeyCode(_ key: String) -> CGKeyCode? {
         return 5
     case "c":
         return 8
+    case "l":
+        return 37
     case "v":
         return 9
     case "n":
@@ -1994,6 +2255,14 @@ private func macKeyCode(_ key: String) -> CGKeyCode? {
         return 53
     case "tab":
         return 48
+    case "pagedown", "page-down", "page_down":
+        return 121
+    case "pageup", "page-up", "page_up":
+        return 116
+    case "down", "arrowdown", "arrow-down", "downarrow", "down-arrow":
+        return 125
+    case "up", "arrowup", "arrow-up", "uparrow", "up-arrow":
+        return 126
     default:
         return nil
     }

@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
-import type { Action, Observation } from "../core/contracts.js"
 import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
+import type { Action, Observation } from "../core/contracts.js"
 import type { Capability, CapabilityResult, SemanticHints } from "./capability.js"
 
 /**
@@ -22,6 +22,10 @@ export class ScreenshotTargetLocator implements Capability {
 
   canHandle(action: Action, observation: Observation, hints?: SemanticHints): boolean {
     if (!this.helper || !canUseVisualTarget(action.kind)) {
+      return false
+    }
+
+    if (requiresSemanticElementTarget(action)) {
       return false
     }
 
@@ -57,7 +61,12 @@ export class ScreenshotTargetLocator implements Capability {
         }
       }
 
-      const coordinate = toScreenCoordinate(result, screenshot.width, screenshot.height, observation)
+      const coordinate = toScreenCoordinate(
+        result,
+        screenshot.width,
+        screenshot.height,
+        observation,
+      )
 
       return {
         success: true,
@@ -139,7 +148,9 @@ If no visible clickable target matches, return:
     }
 
     const description = this.stringInput(action, "description", "")
-    const match = description.match(/\b(?:click|hover)\s+(?:tab|button|link|item|row|cell|list)?\s*(?:named|labeled|called)?\s+(.+)$/i)
+    const match = description.match(
+      /\b(?:click|hover)\s+(?:tab|button|link|item|row|cell|list)?\s*(?:named|labeled|called)?\s+(.+)$/i,
+    )
     return match?.[1]?.trim() || undefined
   }
 
@@ -188,20 +199,25 @@ function findScreenshotWindowFrame(
     return undefined
   }
 
-  const scale = typeof observation.coordinateSpace?.scale === "number" && observation.coordinateSpace.scale > 0
-    ? observation.coordinateSpace.scale
-    : 1
+  const scale =
+    typeof observation.coordinateSpace?.scale === "number" && observation.coordinateSpace.scale > 0
+      ? observation.coordinateSpace.scale
+      : 1
 
   return windows
     .map((frame) => ({
       frame,
-      delta: Math.abs(frame.width * scale - screenshotWidth) + Math.abs(frame.height * scale - screenshotHeight),
+      delta:
+        Math.abs(frame.width * scale - screenshotWidth) +
+        Math.abs(frame.height * scale - screenshotHeight),
     }))
     .sort((left, right) => left.delta - right.delta)
     .at(0)?.frame
 }
 
-function isWindowFrame(value: unknown): value is { x: number; y: number; width: number; height: number } {
+function isWindowFrame(
+  value: unknown,
+): value is { x: number; y: number; width: number; height: number } {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -217,7 +233,16 @@ function canUseVisualTarget(kind: Action["kind"]): boolean {
   return kind === "click" || kind === "secondary-click" || kind === "hover"
 }
 
-function isUsablePoint(result: Record<string, unknown>, width: number, height: number): result is { x: number; y: number } {
+function requiresSemanticElementTarget(action: Action): boolean {
+  const description = typeof action.input?.description === "string" ? action.input.description : ""
+  return /\b(?:click|hover)\s+tab\s+named\b/i.test(description)
+}
+
+function isUsablePoint(
+  result: Record<string, unknown>,
+  width: number,
+  height: number,
+): result is { x: number; y: number } {
   if (result.status === "target_not_found") {
     return false
   }

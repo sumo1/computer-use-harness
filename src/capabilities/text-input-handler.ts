@@ -63,12 +63,12 @@ export class TextInputHandler implements Capability {
   private findSearchInput(elements: Observation["elements"]): Action["element"] {
     const candidates = this.visibleNonMenuElements(elements)
     const bySearchName = candidates.find((element) => {
-      const role = this.normalize(element.role)
+      const role = this.semanticRole(element)
       const name = this.normalize(element.name)
       return name.includes("search") || name.includes("搜索") || role.includes("search")
     })
 
-    return bySearchName ?? candidates.find((element) => this.isTextInputRole(this.normalize(element.role)))
+    return bySearchName ?? candidates.find((element) => this.isTextInputRole(this.semanticRole(element)))
   }
 
   private visibleNonMenuElements(elements: Observation["elements"]) {
@@ -88,8 +88,21 @@ export class TextInputHandler implements Capability {
       role.includes("textbox") ||
       role.includes("textarea") ||
       role.includes("textview") ||
-      role.includes("searchfield")
+      role.includes("searchfield") ||
+      role.includes("文本框")
     )
+  }
+
+  private semanticRole(element: Observation["elements"][number]): string {
+    return [
+      element.role,
+      element.metadata?.roleDescription,
+      element.metadata?.subrole,
+      element.metadata?.axIdentifier,
+    ]
+      .map((value) => this.normalize(value))
+      .filter(Boolean)
+      .join(" ")
   }
 
   private stringInput(action: Action, key: string, fallback: string): string {
