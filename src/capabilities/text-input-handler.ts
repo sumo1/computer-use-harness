@@ -13,7 +13,6 @@ export class TextInputHandler implements Capability {
       return false
     }
 
-    // If action already has element, use it
     if (action.element) {
       return true
     }
@@ -21,7 +20,7 @@ export class TextInputHandler implements Capability {
     // Check if we can find a text input element
     const description = this.normalize(this.stringInput(action, "description", ""))
     if (description.includes("search")) {
-      return this.findSearchInput(observation.elements) !== undefined
+      return this.findSearchInput(observation) !== undefined
     }
 
     return false
@@ -32,7 +31,6 @@ export class TextInputHandler implements Capability {
     observation: Observation,
     hints?: SemanticHints,
   ): Promise<CapabilityResult> {
-    // Use existing element if available
     if (action.element) {
       return {
         success: true,
@@ -44,7 +42,7 @@ export class TextInputHandler implements Capability {
     // Find search input
     const description = this.normalize(this.stringInput(action, "description", ""))
     if (description.includes("search")) {
-      const element = this.findSearchInput(observation.elements)
+      const element = this.findSearchInput(observation)
       if (element) {
         return {
           success: true,
@@ -60,15 +58,17 @@ export class TextInputHandler implements Capability {
     }
   }
 
-  private findSearchInput(elements: Observation["elements"]): Action["element"] {
-    const candidates = this.visibleNonMenuElements(elements)
+  private findSearchInput(observation: Observation): Action["element"] {
+    const candidates = this.visibleNonMenuElements(this.axElementSource(observation))
     const bySearchName = candidates.find((element) => {
       const role = this.semanticRole(element)
       const name = this.normalize(element.name)
       return name.includes("search") || name.includes("搜索") || role.includes("search")
     })
 
-    return bySearchName ?? candidates.find((element) => this.isTextInputRole(this.semanticRole(element)))
+    return (
+      bySearchName ?? candidates.find((element) => this.isTextInputRole(this.semanticRole(element)))
+    )
   }
 
   private visibleNonMenuElements(elements: Observation["elements"]) {
@@ -116,5 +116,21 @@ export class TextInputHandler implements Capability {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
+  }
+
+  private axElementSource(observation: Observation): Observation["elements"] {
+    if (observation.axElements) {
+      return observation.axElements
+    }
+
+    return observation.elements.filter((element) => !this.isVisualTextElement(element))
+  }
+
+  private isVisualTextElement(element: Observation["elements"][number]): boolean {
+    return (
+      element.metadata?.source === "screenshot-ocr" ||
+      element.metadata?.synthetic === true ||
+      this.normalize(element.role).includes("ocr")
+    )
   }
 }

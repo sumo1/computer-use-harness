@@ -1,4 +1,11 @@
-import type { Action, ActionResult, JsonObject, Observation, Screenshot, Target } from "../../core/contracts.js"
+import type {
+  Action,
+  ActionResult,
+  JsonObject,
+  Observation,
+  Screenshot,
+  Target,
+} from "../../core/contracts.js"
 import type { ActionErrorCode } from "../../core/errors.js"
 
 export type MacPermissionState = "granted" | "missing" | "unknown"
@@ -69,6 +76,14 @@ export interface MacAppState {
   observation: Observation
 }
 
+export type MacObservationMode = "full" | "ax-only" | "visual-text"
+
+export interface MacObservationOptions {
+  mode?: MacObservationMode
+  includeOCR?: boolean
+  includeScreenshotPayload?: boolean
+}
+
 export interface MacActionParams {
   action: Action
 }
@@ -94,7 +109,7 @@ export interface MacHelperClient {
   permissionStatus(): Promise<MacPermissionStatus>
   listApps(): Promise<MacRunningApp[]>
   listWindows(target: Target): Promise<MacWindow[]>
-  getAppState(target: Target): Promise<MacAppState>
+  getAppState(target: Target, options?: MacObservationOptions): Promise<MacAppState>
   screenshot(target: Target): Promise<MacScreenshot>
   open(params: MacActionParams): Promise<ActionResult>
   click(params: MacActionParams): Promise<ActionResult>

@@ -17,6 +17,12 @@ private struct CapturedAppScreenshot {
     let payload: [String: Any]
 }
 
+private struct ObservationOptions {
+    let mode: String
+    let includeOCR: Bool
+    let includeScreenshotPayload: Bool
+}
+
 runStdioLoop()
 
 private func runStdioLoop() {
@@ -177,7 +183,10 @@ private func listWindows(params: [String: Any]) -> [[String: Any]] {
 private func appState(params: [String: Any]) -> [String: Any] {
     let target = readTarget(params: params)
     let windows = listWindows(params: params)
-    var elements = collectAXElements(target: target)
+    let options = readObservationOptions(params: params)
+    let axElements = collectAXElements(target: target)
+    var visualTextElements: [[String: Any]] = []
+    var elements = axElements
 
     let permissions: [String: String] = [
         "accessibility": AXIsProcessTrusted() ? "granted" : "missing",
@@ -187,13 +196,18 @@ private func appState(params: [String: Any]) -> [String: Any] {
 
     var screenshotPayload: [String: Any]?
     var ocrElementCount = 0
-    if permissions["screenRecording"] == "granted",
+    if (options.includeOCR || options.includeScreenshotPayload),
+       permissions["screenRecording"] == "granted",
        let screenshot = captureAppScreenshot(target: target) {
-        screenshotPayload = screenshot.payload
+        if options.includeScreenshotPayload {
+            screenshotPayload = screenshot.payload
+        }
 
-        let ocrElements = collectScreenshotTextElements(target: target, screenshot: screenshot)
-        ocrElementCount = ocrElements.count
-        elements.append(contentsOf: ocrElements)
+        if options.includeOCR {
+            visualTextElements = collectScreenshotTextElements(target: target, screenshot: screenshot)
+            ocrElementCount = visualTextElements.count
+            elements.append(contentsOf: visualTextElements)
+        }
     }
 
     var observation: [String: Any] = [
@@ -202,11 +216,17 @@ private func appState(params: [String: Any]) -> [String: Any] {
         "source": "mac-helper",
         "timestamp": timestamp(),
         "elements": elements,
+        "axElements": axElements,
+        "visualTextElements": visualTextElements,
         "metadata": [
             "helperMethod": "getAppState",
+            "observationMode": options.mode,
             "windowCount": windows.count,
             "elementCount": elements.count,
+            "axElementCount": axElements.count,
+            "visualTextElementCount": visualTextElements.count,
             "ocrElementCount": ocrElementCount,
+            "screenshotPayloadIncluded": screenshotPayload != nil,
             "accessibility": permissions["accessibility"] ?? "unknown",
         ],
     ]
@@ -215,11 +235,11 @@ private func appState(params: [String: Any]) -> [String: Any] {
         observation["screenshot"] = screenshotPayload
     }
 
-    if !elements.isEmpty {
-        observation["accessibilityTree"] = buildAccessibilityTree(elements: elements)
+    if !axElements.isEmpty {
+        observation["accessibilityTree"] = buildAccessibilityTree(elements: axElements)
     }
 
-    if let focusedId = findFocusedElementId(elements: elements) {
+    if let focusedId = findFocusedElementId(elements: axElements) {
         observation["focusedElementId"] = focusedId
     }
 
@@ -479,6 +499,7 @@ private func collectScreenshotTextElements(
                 "metadata": [
                     "source": "screenshot-ocr",
                     "synthetic": true,
+                    "sourcePriority": 20,
                     "confidence": Double(candidate.confidence),
                     "frame": rectDictionary(
                         denormalizedVisionFrame(
@@ -682,6 +703,9 @@ private func axElementSnapshot(
     var metadata: [String: Any] = [
         "pid": Int(app.processIdentifier),
         "path": pathString,
+        "source": "accessibility",
+        "synthetic": false,
+        "sourcePriority": 0,
     ]
 
     if let bundleId = app.bundleIdentifier {
@@ -1035,6 +1059,43 @@ private func performType(action: [String: Any], actionId: String, method: String
     }
 
     guard let element = resolveActionElement(action, expectedPid: app.processIdentifier) else {
+        if actionElementIsSynthetic(action), let point = actionElementFrameCenter(action) {
+            activateTargetApp(app)
+
+            guard postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) else {
+                return failedActionResult(
+                    actionId: actionId,
+                    method: method,
+                    code: "ACTION_FAILED",
+                    message: "Refusing synthetic element type because target app is not the front layer-zero window at that point.",
+                    details: ["x": point.x, "y": point.y]
+                )
+            }
+
+            usleep(200_000)
+
+            if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
+                return passedActionResult(
+                    actionId: actionId,
+                    method: method,
+                    metadata: [
+                        "text": text,
+                        "inputMethod": "verified-hid-synthetic-element-frame-paste",
+                        "x": point.x,
+                        "y": point.y,
+                    ]
+                )
+            }
+
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "ACTION_FAILED",
+                message: "Synthetic element was focused but text paste failed.",
+                details: ["x": point.x, "y": point.y]
+            )
+        }
+
         return failedActionResult(
             actionId: actionId,
             method: method,
@@ -2424,6 +2485,53 @@ private func readTarget(params: [String: Any]) -> [String: Any] {
     ]
 }
 
+private func readObservationOptions(params: [String: Any]) -> ObservationOptions {
+    let rawOptions = params["observationOptions"] as? [String: Any] ?? [:]
+    let mode = nonEmptyString(rawOptions["mode"])?.lowercased() ?? "full"
+    var includeOCR = true
+    var includeScreenshotPayload = true
+
+    if mode == "ax-only" {
+        includeOCR = false
+        includeScreenshotPayload = false
+    } else if mode == "visual-text" {
+        includeOCR = true
+        includeScreenshotPayload = false
+    }
+
+    if let explicitIncludeOCR = boolInput(rawOptions["includeOCR"]) {
+        includeOCR = explicitIncludeOCR
+    }
+    if let explicitIncludeScreenshotPayload = boolInput(rawOptions["includeScreenshotPayload"]) {
+        includeScreenshotPayload = explicitIncludeScreenshotPayload
+    }
+
+    return ObservationOptions(
+        mode: mode,
+        includeOCR: includeOCR,
+        includeScreenshotPayload: includeScreenshotPayload
+    )
+}
+
+private func boolInput(_ value: Any?) -> Bool? {
+    if let value = value as? Bool {
+        return value
+    }
+
+    guard let string = nonEmptyString(value)?.lowercased() else {
+        return nil
+    }
+
+    if ["true", "1", "yes"].contains(string) {
+        return true
+    }
+    if ["false", "0", "no"].contains(string) {
+        return false
+    }
+
+    return nil
+}
+
 private func failedActionResult(
     actionId: String,
     method: String,
@@ -2529,6 +2637,28 @@ private func actionElementCenter(_ action: [String: Any], expectedPid: pid_t) ->
     }
 
     return axElementCenter(element)
+}
+
+private func actionElementIsSynthetic(_ action: [String: Any]) -> Bool {
+    guard let element = action["element"] as? [String: Any] else {
+        return false
+    }
+
+    if let role = nonEmptyString(element["role"])?.lowercased(),
+       role.contains("ocr") {
+        return true
+    }
+
+    guard let metadata = element["metadata"] as? [String: Any] else {
+        return false
+    }
+
+    if let synthetic = metadata["synthetic"] as? Bool,
+       synthetic {
+        return true
+    }
+
+    return nonEmptyString(metadata["source"]) == "screenshot-ocr"
 }
 
 private func actionElementFrameCenter(_ action: [String: Any]) -> CGPoint? {

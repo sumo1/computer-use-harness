@@ -21,7 +21,7 @@ export class FirstResultClicker implements Capability {
     }
 
     // Find first clickable row/cell
-    return this.findFirstClickableResult(observation.elements) !== undefined
+    return this.findFirstClickableResult(this.axElementSource(observation)) !== undefined
   }
 
   async execute(
@@ -29,7 +29,7 @@ export class FirstResultClicker implements Capability {
     observation: Observation,
     hints?: SemanticHints,
   ): Promise<CapabilityResult> {
-    const element = this.findFirstClickableResult(observation.elements)
+    const element = this.findFirstClickableResult(this.axElementSource(observation))
 
     if (element) {
       return {
@@ -77,5 +77,21 @@ export class FirstResultClicker implements Capability {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
+  }
+
+  private axElementSource(observation: Observation): Observation["elements"] {
+    if (observation.axElements) {
+      return observation.axElements
+    }
+
+    return observation.elements.filter((element) => !this.isVisualTextElement(element))
+  }
+
+  private isVisualTextElement(element: Observation["elements"][number]): boolean {
+    return (
+      element.metadata?.source === "screenshot-ocr" ||
+      element.metadata?.synthetic === true ||
+      this.normalize(element.role).includes("ocr")
+    )
   }
 }

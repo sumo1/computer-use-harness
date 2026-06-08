@@ -5,13 +5,14 @@ import type { ActionResult, JsonObject, Target } from "../../core/contracts.js"
 import type {
   MacActionParams,
   MacAppState,
+  MacDragParams,
   MacHelperClient,
   MacHelperError,
   MacHelperMethod,
   MacHelperRequest,
   MacHelperResponse,
-  MacDragParams,
   MacKeyParams,
+  MacObservationOptions,
   MacPermissionStatus,
   MacRunningApp,
   MacScrollParams,
@@ -75,12 +76,18 @@ export class MacHelperProcessClient implements MacHelperClient {
     return result.windows
   }
 
-  async getAppState(target: Target) {
-    return this.send<MacAppState>("getAppState", { target })
+  async getAppState(target: Target, options?: MacObservationOptions) {
+    return this.send<MacAppState>("getAppState", {
+      target,
+      ...(options ? { observationOptions: options } : {}),
+    })
   }
 
   async screenshot(target: Target) {
-    return this.send<{ format: string; data: string; width: number; height: number }>("screenshot", { target })
+    return this.send<{ format: string; data: string; width: number; height: number }>(
+      "screenshot",
+      { target },
+    )
   }
 
   async open(params: MacActionParams) {

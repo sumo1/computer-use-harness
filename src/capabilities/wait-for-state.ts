@@ -1,5 +1,5 @@
-import type { Action, Observation } from "../core/contracts.js"
 import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
+import type { Action, Observation } from "../core/contracts.js"
 import type { Capability, CapabilityResult, SemanticHints } from "./capability.js"
 
 /**
@@ -69,9 +69,14 @@ export class WaitForStateCapability implements Capability {
     const endTime = startTime + timeout
 
     while (Date.now() < endTime) {
-      const state = await this.helper.getAppState(action.target)
+      const state = await this.helper.getAppState(action.target, { mode: "ax-only" })
 
       if (this.checkCondition(state.observation, condition)) {
+        return { waitTime: Date.now() - startTime }
+      }
+
+      const visualState = await this.helper.getAppState(action.target, { mode: "visual-text" })
+      if (this.checkCondition(visualState.observation, condition)) {
         return { waitTime: Date.now() - startTime }
       }
 

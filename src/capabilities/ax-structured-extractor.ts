@@ -247,7 +247,7 @@ function requestedArtistConstraint(taskText: string): string | undefined {
 function visibleTextEntries(observation: Observation): TextEntry[] {
   const entries: TextEntry[] = []
 
-  for (const element of observation.elements) {
+  for (const element of axElementSource(observation)) {
     if (!element.name || !isVisibleFrame(element.metadata?.frame, observation)) {
       continue
     }
@@ -264,6 +264,22 @@ function visibleTextEntries(observation: Observation): TextEntry[] {
   }
 
   return uniqueEntries(entries)
+}
+
+function axElementSource(observation: Observation): Observation["elements"] {
+  if (observation.axElements) {
+    return observation.axElements
+  }
+
+  return observation.elements.filter((element) => !isVisualTextElement(element))
+}
+
+function isVisualTextElement(element: Observation["elements"][number]): boolean {
+  return (
+    element.metadata?.source === "screenshot-ocr" ||
+    element.metadata?.synthetic === true ||
+    normalize(element.role).includes("ocr")
+  )
 }
 
 function collectAccessibilityText(

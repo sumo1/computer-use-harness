@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
-import type { AccessibilityNode, Action, Observation } from "../core/contracts.js"
 import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
+import type { AccessibilityNode, Action, Observation } from "../core/contracts.js"
 import type { Capability, CapabilityResult, SemanticHints } from "./capability.js"
 
 /**
@@ -124,13 +124,16 @@ If the required fields are not present in either the screenshot or accessibility
     // Parse JSON response
     const jsonMatch = textContent.text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      throw new Error("No JSON found in response: " + textContent.text.slice(0, 100))
+      throw new Error(`No JSON found in response: ${textContent.text.slice(0, 100)}`)
     }
 
     return JSON.parse(jsonMatch[0]) as Record<string, unknown>
   }
 
-  private async extractWithAXTree(observation: Observation, query: string): Promise<Record<string, unknown>> {
+  private async extractWithAXTree(
+    observation: Observation,
+    query: string,
+  ): Promise<Record<string, unknown>> {
     const accessibilityContext = this.buildAccessibilityContext(observation)
 
     const prompt = `You are analyzing an application window from accessibility data.
@@ -170,7 +173,7 @@ If the required fields are not present, return: {"status": "no_album_info_found"
     // Parse JSON response
     const jsonMatch = textContent.text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      throw new Error("No JSON found in response: " + textContent.text.slice(0, 100))
+      throw new Error(`No JSON found in response: ${textContent.text.slice(0, 100)}`)
     }
 
     return JSON.parse(jsonMatch[0]) as Record<string, unknown>
@@ -184,15 +187,18 @@ If the required fields are not present, return: {"status": "no_album_info_found"
   private buildAccessibilityContext(observation: Observation): string {
     const entries = this.namedEntries(observation)
     const visibleEntries = entries.filter((entry) => this.isVisibleFrame(entry.frame, observation))
-    const highSignalEntries = visibleEntries.filter((entry) => this.isHighSignalEntry(entry)).slice(0, 120)
+    const highSignalEntries = visibleEntries
+      .filter((entry) => this.isHighSignalEntry(entry))
+      .slice(0, 120)
     const dateLikeEntries = visibleEntries
       .filter((entry) => containsDateLikeText(entry.name))
       .map((entry) => `${entry.role}: "${entry.name}"`)
       .slice(0, 40)
 
-    const highSignalText = highSignalEntries.length > 0
-      ? highSignalEntries.map((entry) => this.formatEntry(entry)).join("\n")
-      : "(none)"
+    const highSignalText =
+      highSignalEntries.length > 0
+        ? highSignalEntries.map((entry) => this.formatEntry(entry)).join("\n")
+        : "(none)"
 
     const dateLikeText = unique(dateLikeEntries).join("\n") || "(none)"
 
@@ -205,10 +211,12 @@ If the required fields are not present, return: {"status": "no_album_info_found"
     ].join("\n")
   }
 
-  private namedEntries(observation: Observation): Array<{ role: string; name: string; frame?: Record<string, unknown> }> {
+  private namedEntries(
+    observation: Observation,
+  ): Array<{ role: string; name: string; frame?: Record<string, unknown> }> {
     const entries: Array<{ role: string; name: string; frame?: Record<string, unknown> }> = []
 
-    for (const element of observation.elements) {
+    for (const element of this.axElementSource(observation)) {
       if (!element.name) {
         continue
       }
@@ -282,16 +290,24 @@ If the required fields are not present, return: {"status": "no_album_info_found"
     )
   }
 
-  private formatEntry(entry: { role: string; name: string; frame?: Record<string, unknown> }): string {
+  private formatEntry(entry: {
+    role: string
+    name: string
+    frame?: Record<string, unknown>
+  }): string {
     const frame = entry.frame
-    const position = this.isRecord(frame) && typeof frame.x === "number" && typeof frame.y === "number"
-      ? ` @(${Math.round(frame.x)},${Math.round(frame.y)})`
-      : ""
+    const position =
+      this.isRecord(frame) && typeof frame.x === "number" && typeof frame.y === "number"
+        ? ` @(${Math.round(frame.x)},${Math.round(frame.y)})`
+        : ""
 
     return `- ${entry.role}${position}: "${entry.name}"`
   }
 
-  private isVisibleFrame(frame: Record<string, unknown> | undefined, observation: Observation): boolean {
+  private isVisibleFrame(
+    frame: Record<string, unknown> | undefined,
+    observation: Observation,
+  ): boolean {
     if (!this.isRecord(frame)) {
       return true
     }
@@ -317,6 +333,26 @@ If the required fields are not present, return: {"status": "no_album_info_found"
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
   }
+
+  private axElementSource(observation: Observation): Observation["elements"] {
+    if (observation.axElements) {
+      return observation.axElements
+    }
+
+    return observation.elements.filter((element) => !this.isVisualTextElement(element))
+  }
+
+  private isVisualTextElement(element: Observation["elements"][number]): boolean {
+    return (
+      element.metadata?.source === "screenshot-ocr" ||
+      element.metadata?.synthetic === true ||
+      normalize(element.role).includes("ocr")
+    )
+  }
+}
+
+function normalize(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : ""
 }
 
 function containsDateLikeText(value: string): boolean {

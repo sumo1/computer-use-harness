@@ -127,15 +127,21 @@ function fakeWindows(target: Target): MacWindow[] {
 
 function fakeObservation(target: Target, reason: string): Observation {
   const focusedWindow = fakeObservationWindow(target)
+  const elements = fakeElements(target)
 
   return {
     id: `${target.id ?? "target"}:observation:${reason}`,
     target,
     source: "mac-helper",
     timestamp: new Date().toISOString(),
-    elements: fakeElements(target),
+    elements,
+    axElements: elements,
+    visualTextElements: [],
     metadata: {
       reason,
+      observationMode: "full",
+      axElementCount: elements.length,
+      visualTextElementCount: 0,
     },
     screenshot: {
       format: "png",
@@ -226,7 +232,11 @@ function passedResult(actionId: string, metadata?: Record<string, string | numbe
   }
 }
 
-function numberInput(action: { input?: Record<string, unknown> }, key: string, fallback: number): number {
+function numberInput(
+  action: { input?: Record<string, unknown> },
+  key: string,
+  fallback: number,
+): number {
   const value = action.input?.[key]
   return typeof value === "number" && Number.isFinite(value) ? value : fallback
 }

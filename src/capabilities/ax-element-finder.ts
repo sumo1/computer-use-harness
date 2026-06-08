@@ -13,14 +13,13 @@ export class AXElementFinder implements Capability {
       return false
     }
 
-    // If action already has element, use it
     if (action.element) {
       return true
     }
 
     // Check if we can find element by keyword
     const keyword = stringInput(action, "keyword", "")
-    if (keyword && this.findByKeyword(observation.elements, keyword, action)) {
+    if (keyword && this.findByKeyword(observation, keyword, action)) {
       return true
     }
 
@@ -29,7 +28,7 @@ export class AXElementFinder implements Capability {
       const actionKey = this.getActionKey(action)
       const axHints = hints[actionKey]?.ax
       if (axHints && axHints.length > 0) {
-        return this.findByHints(observation.elements, axHints) !== undefined
+        return this.findByHints(axElementSource(observation), axHints) !== undefined
       }
     }
 
@@ -41,7 +40,6 @@ export class AXElementFinder implements Capability {
     observation: Observation,
     hints?: SemanticHints,
   ): Promise<CapabilityResult> {
-    // Use existing element if available
     if (action.element) {
       return {
         success: true,
@@ -53,12 +51,15 @@ export class AXElementFinder implements Capability {
     // Try keyword-based finding
     const keyword = stringInput(action, "keyword", "")
     if (keyword) {
-      const element = this.findByKeyword(observation.elements, keyword, action)
+      const element = this.findByKeyword(observation, keyword, action)
       if (element) {
         return {
           success: true,
           element,
-          metadata: { source: "keyword", keyword },
+          metadata: {
+            source: isVisualTextElement(element) ? "visual-text-keyword-fallback" : "keyword",
+            keyword,
+          },
         }
       }
     }
@@ -68,7 +69,7 @@ export class AXElementFinder implements Capability {
       const actionKey = this.getActionKey(action)
       const axHints = hints[actionKey]?.ax
       if (axHints) {
-        const element = this.findByHints(observation.elements, axHints)
+        const element = this.findByHints(axElementSource(observation), axHints)
         if (element) {
           return {
             success: true,
@@ -86,7 +87,7 @@ export class AXElementFinder implements Capability {
   }
 
   private findByKeyword(
-    elements: ElementRef[],
+    observation: Observation,
     keyword: string,
     action: Action,
   ): ElementRef | undefined {
@@ -95,20 +96,28 @@ export class AXElementFinder implements Capability {
       return undefined
     }
 
-    const visibleCandidates = this.visibleNonMenuElements(elements)
+    const axCandidates = this.visibleNonMenuElements(axElementSource(observation))
     const candidates = this.rankCandidates(
-      visibleCandidates.filter((element) =>
-        this.matchesSemanticTarget(element, action, visibleCandidates),
-      ),
+      axCandidates.filter((element) => this.matchesSemanticTarget(element, action, axCandidates)),
       normalizedKeyword,
       action,
     )
 
-    return (
+    const axMatch =
       candidates.find((element) => this.isPressableRole(normalize(element.role))) ??
       candidates.find((element) => normalize(element.role) !== "statictext") ??
       candidates[0]
+
+    if (axMatch || action.kind === "type") {
+      return axMatch
+    }
+
+    const visualCandidates = this.rankCandidates(
+      this.visibleNonMenuElements(visualTextElementSource(observation)),
+      normalizedKeyword,
+      action,
     )
+    return visualCandidates[0]
   }
 
   private findByHints(
@@ -286,6 +295,30 @@ function normalize(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function axElementSource(observation: Observation): ElementRef[] {
+  if (observation.axElements) {
+    return observation.axElements
+  }
+
+  return observation.elements.filter((element) => !isVisualTextElement(element))
+}
+
+function visualTextElementSource(observation: Observation): ElementRef[] {
+  if (observation.visualTextElements) {
+    return observation.visualTextElements
+  }
+
+  return observation.elements.filter(isVisualTextElement)
+}
+
+function isVisualTextElement(element: ElementRef): boolean {
+  return (
+    element.metadata?.source === "screenshot-ocr" ||
+    element.metadata?.synthetic === true ||
+    normalize(element.role).includes("ocr")
+  )
 }
 
 function elementFrame(

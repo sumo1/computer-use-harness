@@ -1,4 +1,4 @@
-import type { MacHelperClient } from "../adapters/mac/helper-protocol.js"
+import type { MacHelperClient, MacObservationOptions } from "../adapters/mac/helper-protocol.js"
 import type { Action, ActionResult, JsonObject, Observation } from "../core/contracts.js"
 import { ActionErrorCode } from "../core/errors.js"
 
@@ -6,6 +6,13 @@ export interface MeasuredActionCall {
   value: ActionResult
   latencyMs: number
   attempts: number
+}
+
+interface MeasuredObservation {
+  observation: Observation
+  latencyMs: number
+  attempts: number
+  metadata: JsonObject
 }
 
 export async function measureActionCall(
@@ -53,7 +60,9 @@ export async function observeAction(
     helperMethod: "getAppState",
     observeLatencyMs:
       observed.latencyMs + verification.extraObserveLatencyMs + settled.extraObserveLatencyMs,
-    observeAttempts: 1 + verification.extraObserveAttempts + settled.extraObserveAttempts,
+    observeAttempts:
+      observed.attempts + verification.extraObserveAttempts + settled.extraObserveAttempts,
+    ...observed.metadata,
     ...verification.metadata,
     ...settled.metadata,
   }
@@ -98,10 +107,11 @@ export async function observeAfterAction(
       ...(settled?.observation
         ? {
             observeLatencyMs: (observed.latencyMs ?? 0) + settled.extraObserveLatencyMs,
-            observeAttempts: 1 + settled.extraObserveAttempts,
+            observeAttempts: (observed.attempts ?? 0) + settled.extraObserveAttempts,
           }
         : {}),
       ...(observed.errorMessage ? { observeFailure: observed.errorMessage } : {}),
+      ...(observed.metadata ?? {}),
       ...(settled?.metadata ?? {}),
     }
 
@@ -128,8 +138,10 @@ export async function observeAfterAction(
     ...baseMetadata,
     observeLatencyMs:
       observed.latencyMs + verification.extraObserveLatencyMs + settled.extraObserveLatencyMs,
-    observeAttempts: 1 + verification.extraObserveAttempts + settled.extraObserveAttempts,
+    observeAttempts:
+      observed.attempts + verification.extraObserveAttempts + settled.extraObserveAttempts,
     verification: verification.verificationMode,
+    ...observed.metadata,
     ...verification.metadata,
     ...settled.metadata,
   }
@@ -174,7 +186,7 @@ export async function observeAfterAction(
 async function tryMeasureObservation(
   helper: MacHelperClient,
   action: Action,
-): Promise<{ observation?: Observation; latencyMs?: number; errorMessage?: string }> {
+): Promise<Partial<MeasuredObservation> & { errorMessage?: string }> {
   try {
     return await measureObservation(helper, action)
   } catch (error) {
@@ -223,7 +235,7 @@ async function verifyObservationStateChange(
       await sleep(pollIntervalMs(action))
       const observed = await measureObservation(helper, action)
       extraObserveLatencyMs += observed.latencyMs
-      extraObserveAttempts += 1
+      extraObserveAttempts += observed.attempts
       currentObservation = observed.observation
       currentFingerprint = observationFingerprint(currentObservation)
       changed = currentFingerprint !== previousFingerprint
@@ -287,14 +299,100 @@ async function verifyObservationStateChange(
 async function measureObservation(
   helper: MacHelperClient,
   action: Action,
-): Promise<{ observation: Observation; latencyMs: number }> {
+): Promise<MeasuredObservation> {
   const startedAt = Date.now()
-  const state = await helper.getAppState(action.target)
+  const preferredOptions = preferredObservationOptions(action)
+  const state = await helper.getAppState(action.target, preferredOptions)
+  const fallbackReason = visualFallbackReason(action, state.observation, preferredOptions)
+
+  if (fallbackReason) {
+    const visualState = await helper.getAppState(action.target, { mode: "visual-text" })
+
+    return {
+      observation: visualState.observation,
+      latencyMs: Date.now() - startedAt,
+      attempts: 2,
+      metadata: {
+        observationMode: "visual-text",
+        observationStrategy: "ax-first",
+        initialObservationMode: preferredOptions.mode ?? "ax-only",
+        visualFallbackReason: fallbackReason,
+      },
+    }
+  }
 
   return {
     observation: state.observation,
     latencyMs: Date.now() - startedAt,
+    attempts: 1,
+    metadata: {
+      observationMode: preferredOptions.mode ?? "ax-only",
+      observationStrategy: "ax-first",
+    },
   }
+}
+
+function preferredObservationOptions(action: Action): MacObservationOptions {
+  const mode = stringInput(action, "observationMode", "ax-first").toLowerCase()
+
+  if (mode === "full" || mode === "visual-text" || mode === "ax-only") {
+    return { mode }
+  }
+
+  return { mode: "ax-only" }
+}
+
+function visualFallbackReason(
+  action: Action,
+  observation: Observation,
+  options: MacObservationOptions,
+): string | undefined {
+  if (options.mode === "full" || options.mode === "visual-text") {
+    return undefined
+  }
+
+  if (booleanInput(action, "disableVisualFallback", false)) {
+    return undefined
+  }
+
+  const condition = semanticCondition(action)
+  if (condition && !observationMatchesCondition(observation, condition)) {
+    return `target-state:${condition.kind}`
+  }
+
+  const typedText = stringInput(action, "text", "")
+  if (action.kind === "type" && typedText && !visibleTextIncludes(observation, typedText)) {
+    return "typed-text-not-visible-in-ax"
+  }
+
+  if (action.kind === "observe" && meaningfulTextCount(observation) < 3) {
+    return "low-ax-text-evidence"
+  }
+
+  return undefined
+}
+
+function meaningfulTextCount(observation: Observation): number {
+  return axElementSource(observation).filter((element) => {
+    const name = normalize(element.name)
+    return name.length > 1 && isVisibleFrame(element.metadata?.frame, observation)
+  }).length
+}
+
+function axElementSource(observation: Observation): Observation["elements"] {
+  if (observation.axElements) {
+    return observation.axElements
+  }
+
+  return observation.elements.filter((element) => !isVisualTextElement(element))
+}
+
+function isVisualTextElement(element: Observation["elements"][number]): boolean {
+  return (
+    element.metadata?.source === "screenshot-ocr" ||
+    element.metadata?.synthetic === true ||
+    normalize(element.role).includes("ocr")
+  )
 }
 
 function observationResult(
@@ -365,7 +463,7 @@ async function settleObservationIfRequested(
     await sleep(pollInterval)
     const observed = await measureObservation(helper, action)
     extraObserveLatencyMs += observed.latencyMs
-    extraObserveAttempts += 1
+    extraObserveAttempts += observed.attempts
 
     const nextFingerprint = observationFingerprint(observed.observation)
     stableObservations = nextFingerprint === currentFingerprint ? stableObservations + 1 : 0

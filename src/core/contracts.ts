@@ -91,6 +91,8 @@ export interface Observation {
   elements: ElementRef[]
   metadata?: JsonObject
 
+  axElements?: ElementRef[]
+  visualTextElements?: ElementRef[]
   screenshot?: Screenshot
   accessibilityTree?: AccessibilityNode[]
   focusedElementId?: string
