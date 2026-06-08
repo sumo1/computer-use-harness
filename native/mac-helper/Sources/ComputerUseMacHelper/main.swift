@@ -3,8 +3,14 @@ import ApplicationServices
 import Foundation
 import Vision
 
-private let maxAXDepth = 8
-private let maxAXElements = 350
+// Depth must accommodate Electron / Chromium apps: the AX tree wraps web
+// content in a long chain of fixed AXGroups (AXApplication > AXWindow >
+// AXGroup x~7 > AXWebArea) before the real DOM even begins, so a shallow
+// limit (the old value of 8) truncated everything at the AXWebArea and made
+// the entire rendered UI invisible. Native mac apps are shallow; Electron
+// DOM trees are deep, so size for the latter.
+private let maxAXDepth = 40
+private let maxAXElements = 800
 private let maxOCRElements = 160
 
 private final class OpenErrorBox: @unchecked Sendable {
