@@ -22,6 +22,10 @@ export type ActionStatus = "passed" | "failed" | "blocked" | "skipped"
 export type TraceEventKind = "run" | "observation" | "action" | "result" | "policy" | "decision"
 export type AppSupportLevel = "blocked" | "custom" | "automation" | "generic" | "screen"
 export type PolicyDecisionStatus = "allowed" | "blocked" | "confirm-required"
+export type InputBackend = "ax-semantic" | "app-targeted-event" | "global-hid"
+export type PointerImpact = "none" | "target-app" | "global"
+export type PointerCoordinateSpace = "screen" | "window" | "element"
+export type VirtualPointerSource = "ax-bounds" | "vision" | "explicit-coordinate" | "inferred"
 
 export interface Target {
   kind: TargetKind
@@ -128,6 +132,55 @@ export interface ActionResult {
   metadata?: JsonObject
 }
 
+export interface InputBackendMetadata {
+  backend: InputBackend
+  method: string
+  pointerImpact: PointerImpact
+  permissionUsed: Array<"accessibility" | "screen-recording" | "input-monitoring">
+  fallbackFrom?: InputBackend
+}
+
+export interface VirtualPointerState {
+  x: number
+  y: number
+  coordinateSpace: PointerCoordinateSpace
+  targetElementId?: string
+  source: VirtualPointerSource
+  visibleInOverlay: boolean
+}
+
+export interface ActionVerificationResult {
+  status: ActionStatus
+  mode: string
+  hasBeforeObservation: boolean
+  hasAfterObservation: boolean
+  beforeObservationId?: string
+  afterObservationId?: string
+  stateChanged?: boolean
+  targetState?: JsonObject
+  message?: string
+}
+
+export interface ActionExecutionSummary {
+  ok: boolean
+  status: ActionStatus
+  adapter: AdapterKind
+  inputBackend?: InputBackendMetadata
+  metadata?: JsonObject
+  error?: ActionError
+}
+
+export interface ActionTraceStep {
+  stepId: string
+  goalId?: string
+  action: Action
+  before?: Observation
+  execution: ActionExecutionSummary
+  after?: Observation
+  verification: ActionVerificationResult
+  virtualPointer?: VirtualPointerState
+}
+
 export interface PolicyDecision {
   id: string
   status: PolicyDecisionStatus
@@ -147,6 +200,7 @@ export interface TraceEvent {
   observation?: Observation
   policy?: PolicyDecision
   result?: ActionResult
+  actionTraceStep?: ActionTraceStep
   metadata?: JsonObject
 }
 

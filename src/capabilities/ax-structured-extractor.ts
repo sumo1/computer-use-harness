@@ -13,20 +13,33 @@ interface TextEntry {
   y?: number
 }
 
+interface RankingValue {
+  field: string
+  raw: string
+  value: string
+  type: "date" | "file-size" | "number"
+  numeric: number
+}
+
 interface RecordCandidate {
-  name: string
-  artist?: string
-  releaseDate: string
+  label: string
+  fields: Record<string, string>
+  ranking: RankingValue
+  evidenceText: string[]
   score: number
 }
 
 const DATE_PATTERN = /\b(\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?)\b/
+const FILE_SIZE_PATTERN =
+  /\b(\d+(?:\.\d+)?)\s*(bytes?|b|kb|kib|mb|mib|gb|gib|tb|tib|字节|千字节|兆字节|吉字节)\b/i
+const NUMBER_PATTERN = /\b\d+(?:\.\d+)?\b/
 
 /**
- * Extract simple date-ranked records from accessibility text before falling back to vision.
+ * Extract ordered records from AX text before falling back to screenshot vision.
  *
- * This is intentionally generic: it does not know QQ Music. It looks for visible date-like
- * values, nearby title/artist text, and optional constraints expressed in the action query.
+ * The extractor is data-shaped, not app-shaped: it looks for the ranking field requested by the
+ * action, groups nearby visible text into a record, applies textual constraints, and returns the
+ * required fields.
  */
 export class AXStructuredExtractor implements Capability {
   readonly name = "ax-structured-extractor"
@@ -43,14 +56,21 @@ export class AXStructuredExtractor implements Capability {
     const query = stringInput(action, "query", "")
     const description = stringInput(action, "description", "")
     const taskText = `${description}\n${query}`
-    const entries = visibleTextEntries(observation)
-    const candidates = dateRankedCandidates(entries, taskText)
     const contract = extractionContractFromAction(action)
+    const orderField = requestedRankingField(taskText, contract.requiredFields)
+    const entries = visibleTextEntries(observation)
+    const constraints = requestedConstraints(taskText)
+    const candidates = rankedRecordCandidates(
+      entries,
+      contract.requiredFields,
+      orderField,
+      constraints,
+    )
 
     if (candidates.length === 0) {
       return {
         success: false,
-        reason: "No date-ranked accessibility records matched the extraction constraints.",
+        reason: "No ordered accessibility records matched the extraction constraints.",
       }
     }
 
@@ -60,9 +80,9 @@ export class AXStructuredExtractor implements Capability {
     if (missing.length > 0) {
       return {
         success: false,
-        reason: `Date-ranked accessibility record was missing required fields: ${missing.join(", ")}.`,
+        reason: `Accessibility record was missing required fields: ${missing.join(", ")}.`,
         metadata: {
-          source: "accessibility-date-ranked-records",
+          source: "accessibility-ordered-records",
           candidates: candidates.slice(0, 5),
           missingFields: missing,
         },
@@ -72,7 +92,7 @@ export class AXStructuredExtractor implements Capability {
     return {
       success: true,
       metadata: {
-        source: "accessibility-date-ranked-records",
+        source: "accessibility-ordered-records",
         result,
         candidates: candidates.slice(0, 5),
       },
@@ -85,11 +105,7 @@ function recordResult(
   requiredFields: string[],
 ): Record<string, string> {
   if (requiredFields.length === 0) {
-    return {
-      name: candidate.name,
-      releaseDate: candidate.releaseDate,
-      ...(candidate.artist ? { artist: candidate.artist } : {}),
-    }
+    return candidate.fields
   }
 
   const result: Record<string, string> = {}
@@ -106,71 +122,93 @@ function recordResult(
 
 function candidateValueForField(candidate: RecordCandidate, field: string): string | undefined {
   const normalized = normalizeFieldName(field)
-
-  if (
-    normalized === "name" ||
-    normalized === "title" ||
-    normalized.includes("albumname") ||
-    normalized === "专辑名"
-  ) {
-    return candidate.name
+  const explicit = Object.entries(candidate.fields).find(
+    ([key]) => normalizeFieldName(key) === normalized,
+  )?.[1]
+  if (explicit) {
+    return explicit
   }
 
-  if (normalized.includes("date") || normalized.includes("time") || normalized.includes("发行")) {
-    return candidate.releaseDate
+  if (normalized === "name" || normalized === "title" || normalized.endsWith("name")) {
+    return candidate.label
   }
 
-  if (normalized.includes("artist") || normalized.includes("歌手") || normalized.includes("艺人")) {
-    return candidate.artist
+  if (normalizeFieldName(candidate.ranking.field) === normalized) {
+    return candidate.ranking.value
   }
 
   return undefined
 }
 
-function dateRankedCandidates(entries: TextEntry[], taskText: string): RecordCandidate[] {
-  const requestedArtist = requestedArtistConstraint(taskText)
-  const dateEntries = entries.filter((entry) => DATE_PATTERN.test(entry.text))
-
-  return dateEntries
-    .map((dateEntry) => recordNearDate(dateEntry, entries, requestedArtist))
+function rankedRecordCandidates(
+  entries: TextEntry[],
+  requiredFields: string[],
+  orderField: string,
+  constraints: Record<string, string>,
+): RecordCandidate[] {
+  return entries
+    .map((entry) => ({ entry, ranking: rankingValueFromText(orderField, entry.text) }))
+    .filter(
+      (candidate): candidate is { entry: TextEntry; ranking: RankingValue } =>
+        candidate.ranking !== undefined,
+    )
+    .map((candidate) =>
+      recordNearRanking(candidate.entry, candidate.ranking, entries, requiredFields, constraints),
+    )
     .filter((candidate): candidate is RecordCandidate => candidate !== undefined)
-    .sort((left, right) => {
-      const dateDelta =
-        Date.parse(normalizeDate(right.releaseDate)) - Date.parse(normalizeDate(left.releaseDate))
-      return dateDelta !== 0 ? dateDelta : right.score - left.score
-    })
+    .sort((left, right) => right.ranking.numeric - left.ranking.numeric || right.score - left.score)
 }
 
-function recordNearDate(
-  dateEntry: TextEntry,
+function recordNearRanking(
+  rankEntry: TextEntry,
+  ranking: RankingValue,
   entries: TextEntry[],
-  requestedArtist: string | undefined,
+  requiredFields: string[],
+  constraints: Record<string, string>,
 ): RecordCandidate | undefined {
-  const releaseDate = normalizeDate(dateEntry.text.match(DATE_PATTERN)?.[1] ?? "")
-  if (!releaseDate) {
+  const neighbors = nearbyEntries(rankEntry, entries)
+  const constraintFields = constraintFieldsFromEntries(neighbors, constraints)
+  if (!constraintsSatisfied(neighbors, constraintFields, constraints)) {
     return undefined
   }
 
-  const neighbors = nearbyEntries(dateEntry, entries)
-  const artist = requestedArtist
-    ? neighbors.find((entry) => normalize(entry.text).includes(normalize(requestedArtist)))?.text
-    : likelyArtist(neighbors)
-
-  if (requestedArtist && !artist) {
+  const label = likelyLabel(neighbors, rankEntry, constraintFields)
+  if (!label) {
     return undefined
   }
 
-  const name = likelyTitle(neighbors, dateEntry, artist)
-  if (!name) {
-    return undefined
-  }
+  const fields = candidateFields(label, ranking, requiredFields, constraintFields)
 
   return {
-    name,
-    artist: artist ?? requestedArtist,
-    releaseDate,
-    score: (artist ? 40 : 0) + (hasCoordinates(dateEntry) ? 10 : 0),
+    label,
+    fields,
+    ranking,
+    evidenceText: evidenceText([rankEntry, ...neighbors]),
+    score: Object.keys(constraintFields).length * 40 + (hasCoordinates(rankEntry) ? 10 : 0),
   }
+}
+
+function candidateFields(
+  label: string,
+  ranking: RankingValue,
+  requiredFields: string[],
+  constraintFields: Record<string, string>,
+): Record<string, string> {
+  const fields: Record<string, string> = {
+    ...constraintFields,
+    name: label,
+    title: label,
+    [ranking.field]: ranking.value,
+  }
+
+  for (const field of requiredFields) {
+    const normalized = normalizeFieldName(field)
+    if ((normalized.endsWith("name") || normalized === "title") && !fields[field]) {
+      fields[field] = label
+    }
+  }
+
+  return fields
 }
 
 function nearbyEntries(anchor: TextEntry, entries: TextEntry[]): TextEntry[] {
@@ -186,7 +224,7 @@ function nearbyEntries(anchor: TextEntry, entries: TextEntry[]): TextEntry[] {
     sameRow.length > 0
       ? sameRow
       : entries.filter(
-          (entry) => entry !== anchor && entry.y !== undefined && Math.abs(entry.y - anchorY) <= 72,
+          (entry) => entry !== anchor && entry.y !== undefined && Math.abs(entry.y - anchorY) <= 96,
         )
 
   return nearby.sort(
@@ -195,34 +233,24 @@ function nearbyEntries(anchor: TextEntry, entries: TextEntry[]): TextEntry[] {
   )
 }
 
-function likelyTitle(
+function likelyLabel(
   entries: TextEntry[],
-  dateEntry: TextEntry,
-  artist: string | undefined,
+  rankEntry: TextEntry,
+  constraintFields: Record<string, string>,
 ): string | undefined {
-  const ignored = new Set(
-    [dateEntry.text, artist].filter((value): value is string => Boolean(value)),
-  )
+  const ignored = new Set([rankEntry.text, ...Object.values(constraintFields)])
 
   return entries
     .map((entry) => entry.text.trim())
     .filter((text) => text && !ignored.has(text))
-    .filter((text) => !DATE_PATTERN.test(text))
+    .filter((text) => !rankingValueFromText("", text))
     .filter((text) => !isChromeOrControlText(text))
-    .sort((left, right) => titleScore(right) - titleScore(left))[0]
+    .sort((left, right) => labelScore(right) - labelScore(left))[0]
 }
 
-function likelyArtist(entries: TextEntry[]): string | undefined {
-  return entries
-    .map((entry) => entry.text.trim())
-    .filter((text) => text && !DATE_PATTERN.test(text))
-    .filter((text) => !isChromeOrControlText(text))
-    .find((text) => text.length <= 40)
-}
-
-function titleScore(text: string): number {
+function labelScore(text: string): number {
   let score = 0
-  if (text.length > 1 && text.length <= 80) {
+  if (text.length > 1 && text.length <= 100) {
     score += 20
   }
   if (/[\u4e00-\u9fa5A-Za-z0-9]/.test(text)) {
@@ -234,14 +262,219 @@ function titleScore(text: string): number {
   return score
 }
 
-function requestedArtistConstraint(taskText: string): string | undefined {
-  const explicit = taskText.match(/artist\s+is\s+([^\s,，.;；]+)/i)?.[1]
+function requestedRankingField(taskText: string, requiredFields: string[]): string {
+  const explicit = taskText.match(/\b(?:compare|sort|order)\s+([a-zA-Z0-9_\-\u4e00-\u9fa5]+)/i)?.[1]
   if (explicit) {
-    return explicit.trim()
+    const normalizedExplicit = normalizeFieldName(explicit)
+    const matchingFields = requiredFields.filter((field) => {
+      const normalizedField = normalizeFieldName(field)
+      return (
+        normalizedField === normalizedExplicit ||
+        normalizedField.startsWith(normalizedExplicit) ||
+        normalizedExplicit.startsWith(normalizedField)
+      )
+    })
+    const matchingField =
+      matchingFields.find((field) => {
+        const normalizedField = normalizeFieldName(field)
+        return (
+          isDateField(normalizedField) ||
+          isFileSizeField(normalizedField) ||
+          isNumberField(normalizedField)
+        )
+      }) ?? matchingFields[0]
+
+    return matchingField ?? explicit
   }
 
-  const chinese = taskText.match(/(?:歌手|艺人)(?:是|为|:|：)\s*([^\s,，.;；]+)/)?.[1]
-  return chinese?.trim()
+  return (
+    requiredFields.find((field) => {
+      const normalized = normalizeFieldName(field)
+      return isDateField(normalized) || isFileSizeField(normalized) || isNumberField(normalized)
+    }) ?? "rank"
+  )
+}
+
+function requestedConstraints(taskText: string): Record<string, string> {
+  const constraints: Record<string, string> = {}
+  const english = taskText.matchAll(
+    /\b(?:where|only accept entries where)\s+([a-zA-Z0-9_\-\u4e00-\u9fa5]+)\s+(?:is|=)\s+([^\s,，.;；]+)/gi,
+  )
+
+  for (const match of english) {
+    if (match[1] && match[2]) {
+      constraints[match[1]] = match[2]
+    }
+  }
+
+  const chinese = taskText.matchAll(
+    /(?:其中|只接受|筛选)?\s*([a-zA-Z0-9_\-\u4e00-\u9fa5]+)(?:是|为|=|：|:)\s*([^\s,，.;；]+)/g,
+  )
+  for (const match of chinese) {
+    if (match[1] && match[2] && normalizeFieldName(match[1]).length <= 20) {
+      constraints[match[1]] = match[2]
+    }
+  }
+
+  return constraints
+}
+
+function constraintFieldsFromEntries(
+  entries: TextEntry[],
+  constraints: Record<string, string>,
+): Record<string, string> {
+  const fields: Record<string, string> = {}
+
+  for (const [field, expected] of Object.entries(constraints)) {
+    const match = entries.find((entry) => normalize(entry.text).includes(normalize(expected)))
+    if (match) {
+      fields[field] = match.text
+    }
+  }
+
+  return fields
+}
+
+function constraintsSatisfied(
+  entries: TextEntry[],
+  fields: Record<string, string>,
+  constraints: Record<string, string>,
+): boolean {
+  for (const [field, expected] of Object.entries(constraints)) {
+    const explicit = fields[field]
+    const visible = entries.some((entry) => normalize(entry.text).includes(normalize(expected)))
+    if (!normalize(explicit).includes(normalize(expected)) && !visible) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function rankingValueFromText(field: string, text: string): RankingValue | undefined {
+  const normalizedField = normalizeFieldName(field)
+
+  if (isFileSizeField(normalizedField)) {
+    return fileSizeRanking(field, text)
+  }
+
+  if (isDateField(normalizedField)) {
+    return dateRanking(field, text)
+  }
+
+  if (isNumberField(normalizedField)) {
+    return numberRanking(field, text)
+  }
+
+  return (
+    dateRanking(field || "date", text) ??
+    fileSizeRanking(field || "size", text) ??
+    numberRanking(field || "number", text)
+  )
+}
+
+function dateRanking(field: string, text: string): RankingValue | undefined {
+  const value = normalizeDate(text)
+  if (!value) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: text,
+    value,
+    type: "date",
+    numeric: Date.parse(value),
+  }
+}
+
+function fileSizeRanking(field: string, text: string): RankingValue | undefined {
+  const match = text.match(FILE_SIZE_PATTERN)
+  if (!match?.[1] || !match[2]) {
+    return undefined
+  }
+
+  const amount = Number(match[1])
+  const multiplier = fileSizeMultiplier(match[2])
+  if (!Number.isFinite(amount) || multiplier === undefined) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: match[0],
+    value: match[0],
+    type: "file-size",
+    numeric: amount * multiplier,
+  }
+}
+
+function numberRanking(field: string, text: string): RankingValue | undefined {
+  const match = text.match(NUMBER_PATTERN)
+  if (!match?.[0]) {
+    return undefined
+  }
+
+  const numeric = Number(match[0])
+  if (!Number.isFinite(numeric)) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: match[0],
+    value: match[0],
+    type: "number",
+    numeric,
+  }
+}
+
+function fileSizeMultiplier(unit: string): number | undefined {
+  const normalized = unit.toLowerCase()
+  const units: Record<string, number> = {
+    b: 1,
+    byte: 1,
+    bytes: 1,
+    kb: 1024,
+    kib: 1024,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+    tb: 1024 ** 4,
+    tib: 1024 ** 4,
+    字节: 1,
+    千字节: 1024,
+    兆字节: 1024 ** 2,
+    吉字节: 1024 ** 3,
+  }
+
+  return units[normalized]
+}
+
+function isDateField(field: string): boolean {
+  return (
+    field.includes("date") ||
+    field.includes("time") ||
+    field.includes("日期") ||
+    field.includes("时间") ||
+    field.includes("发行")
+  )
+}
+
+function isFileSizeField(field: string): boolean {
+  return field.includes("size") || field.includes("bytes") || field.includes("大小")
+}
+
+function isNumberField(field: string): boolean {
+  return (
+    field.includes("count") ||
+    field.includes("number") ||
+    field.includes("score") ||
+    field.includes("hot") ||
+    field.includes("热度") ||
+    field.includes("数量")
+  )
 }
 
 function visibleTextEntries(observation: Observation): TextEntry[] {
@@ -381,6 +614,16 @@ function isChromeOrControlText(value: string): boolean {
 
 function hasCoordinates(entry: TextEntry): boolean {
   return entry.x !== undefined && entry.y !== undefined
+}
+
+function evidenceText(entries: TextEntry[]): string[] {
+  return Array.from(
+    new Set(
+      entries
+        .map((entry) => entry.text.trim())
+        .filter((text) => text && !isChromeOrControlText(text)),
+    ),
+  ).slice(0, 12)
 }
 
 function stringInput(action: Action, key: string, fallback: string): string {

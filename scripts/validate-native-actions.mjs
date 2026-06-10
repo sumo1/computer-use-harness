@@ -20,6 +20,10 @@ assert.equal(observe.data.action.kind, "observe")
 assert.equal(observe.data.observation.elements.length, 2)
 assert.equal(existsSync(observe.data.tracePath), true)
 
+const finderAlias = runCli(["observe", "--app", "Finder", "--fake", "--pretty"])
+assert.equal(finderAlias.data.target.id, "com.apple.finder")
+assert.equal(finderAlias.data.target.name, "Finder")
+
 const click = runCli([
   "click",
   "--app",
@@ -36,6 +40,10 @@ assert.equal(click.data.action.kind, "click")
 assert.equal(click.data.action.element.name, "Primary")
 assert.equal(click.data.action.input.capabilityUsed, "ax-element-finder")
 assertHasObservationBefore(click.data.trace)
+assertActionTraceStep(click.data.trace, "click", {
+  backend: "ax-semantic",
+  pointerSource: "ax-bounds",
+})
 
 const type = runCli([
   "type",
@@ -56,6 +64,10 @@ assert.equal(type.data.action.element.name, "Main Input")
 assert.equal(type.data.result.metadata.text, "hello")
 assert.equal(type.data.action.input.capabilityUsed, "ax-element-finder")
 assertHasObservationBefore(type.data.trace)
+assertActionTraceStep(type.data.trace, "type", {
+  backend: "ax-semantic",
+  pointerSource: "ax-bounds",
+})
 
 const scroll = runCli(["scroll", "--app", "Fake Target App", "--fake", "down", "2", "--pretty"])
 assert.equal(scroll.data.status, "passed")
@@ -64,6 +76,10 @@ assert.equal(scroll.data.result.metadata.helperMethod, "scroll")
 assert.equal(scroll.data.result.metadata.direction, "down")
 assert.equal(scroll.data.result.metadata.amount, 2)
 assertHasObservationBefore(scroll.data.trace)
+assertActionTraceStep(scroll.data.trace, "scroll", {
+  backend: "app-targeted-event",
+  pointerSource: "ax-bounds",
+})
 
 const policy = runCli(["policy-check", "--app", "Fake Target App", "--fake", "--pretty"])
 assert.equal(policy.data.status, "passed")
@@ -121,6 +137,35 @@ function assertHasObservationBefore(trace) {
       (event) => event.kind === "observation" && event.action?.id.endsWith(":observe-before"),
     ),
   )
+}
+
+function assertActionTraceStep(trace, actionKind, expected) {
+  const resultEvent = trace.find(
+    (event) => event.kind === "result" && event.action?.kind === actionKind,
+  )
+  assert(resultEvent, `missing result event for ${actionKind}`)
+  assert(resultEvent.actionTraceStep, `missing actionTraceStep for ${actionKind}`)
+  assert.equal(resultEvent.actionTraceStep.action.kind, actionKind)
+  assert.equal(resultEvent.actionTraceStep.execution.inputBackend.backend, expected.backend)
+  assert.equal(
+    resultEvent.actionTraceStep.execution.inputBackend.pointerImpact,
+    expected.backend === "ax-semantic" ? "none" : "target-app",
+  )
+  assert.equal(resultEvent.actionTraceStep.virtualPointer.source, expected.pointerSource)
+  assert.equal(resultEvent.actionTraceStep.verification.hasBeforeObservation, true)
+  assert.equal(resultEvent.actionTraceStep.verification.hasAfterObservation, true)
+  assert.equal(resultEvent.actionTraceStep.verification.status, "passed")
+  assert.equal(resultEvent.result.metadata.actionTraceStep.actionKind, actionKind)
+  assert.equal(
+    resultEvent.result.metadata.actionTraceStep.execution.inputBackend.backend,
+    expected.backend,
+  )
+  const overlay = resultEvent.result.metadata.actionTraceStep.virtualPointerOverlay
+  assert.equal(overlay.format, "svg")
+  assert.equal(typeof overlay.x, "number")
+  assert.equal(typeof overlay.y, "number")
+  assert(overlay.x >= 0 && overlay.x <= overlay.width)
+  assert(overlay.y >= 0 && overlay.y <= overlay.height)
 }
 
 function axOnlyHelperWithMissingScreenRecording() {

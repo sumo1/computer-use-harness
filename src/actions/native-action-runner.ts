@@ -15,6 +15,7 @@ import type {
 import { ActionErrorCode } from "../core/errors.js"
 import { evaluatePolicy } from "../runtime/policy.js"
 import { appendTraceEvent } from "../usecases/action-plan.js"
+import { actionTraceStepMetadata, createActionTraceStep } from "./action-trace-step.js"
 import { executeNativeAction } from "./native-action-executor.js"
 
 export interface NativeActionRunnerOptions {
@@ -145,12 +146,13 @@ async function runWithHelper(
     policy,
   })
 
+  const beforeObservation = currentObservation
   const execution =
     policy.status === "blocked"
       ? { result: createPolicyBlockedResult(action, policy), metadata: undefined }
       : await executeNativeAction(helper, action, currentObservation)
 
-  const result =
+  let result =
     policy.status === "blocked"
       ? execution.result
       : withMetadata(withPolicy(execution.result, policy), {
@@ -179,6 +181,17 @@ async function runWithHelper(
     })
   }
 
+  const actionTraceStep = createActionTraceStep({
+    action,
+    result,
+    before: beforeObservation,
+    after: execution.observation,
+    executionMetadata: execution.metadata,
+  })
+  result = withMetadata(result, {
+    actionTraceStep: actionTraceStepMetadata(actionTraceStep),
+  })
+
   appendTraceEvent(trace, {
     traceId,
     kind: "result",
@@ -186,6 +199,7 @@ async function runWithHelper(
     action,
     policy,
     result,
+    actionTraceStep,
     metadata: result.metadata,
   })
 

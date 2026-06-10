@@ -162,6 +162,21 @@ assert.deepEqual(secondExtractResult.result.metadata?.result, {
   artist: "周杰伦",
 })
 
+const fileExtract = createUseCaseAction(
+  "LOOP",
+  30,
+  "extract largest file from visible Downloads file list; compare file sizes and return fileName fileSize",
+  target,
+  "mac-helper",
+)
+const fileExtractResult = await chain.execute(fileExtract, downloadsFilesObservation())
+assert.equal(fileExtractResult.result.success, true)
+assert.equal(fileExtractResult.usedCapability, "ax-structured-extractor")
+assert.deepEqual(fileExtractResult.result.metadata?.result, {
+  fileName: "dataset.parquet",
+  fileSize: "2.4 GB",
+})
+
 const helperPath = writeLoopHelper("happy")
 const cliRun = spawnSync(
   process.execPath,
@@ -183,6 +198,37 @@ assert.equal(cliResult.ok, true)
 assert.equal(cliResult.data.status, "passed")
 assert(cliResult.data.steps.at(-1)?.description.includes("extract target goal result"))
 assertTargetLoopMetadata(cliResult.data.trace)
+
+const filesHelperPath = writeLoopHelper("files-largest")
+const filesCliRun = spawnSync(
+  process.execPath,
+  ["dist/cli/index.js", "usecases", "run", "UC-120", "--mac-helper", filesHelperPath, "--pretty"],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(filesCliRun.status, 0, filesCliRun.stderr || filesCliRun.stdout)
+
+const filesCliResult = JSON.parse(filesCliRun.stdout)
+assert.equal(filesCliResult.ok, true)
+assert.equal(filesCliResult.data.status, "passed")
+assertTargetLoopMetadata(filesCliResult.data.trace)
+
+const filesExtractResult = filesCliResult.data.trace
+  .filter((event) => event.kind === "result")
+  .map((event) => event.result)
+  .find((result) => result?.metadata?.helperMethod === "extract" && result.ok)
+const filesExtractedData = JSON.parse(filesExtractResult.metadata.extractedData)
+assert.equal(filesExtractedData.fileName, "dataset.parquet")
+assert.equal(filesExtractedData.fileSize, "2.4 GB")
+assert.equal(filesExtractedData.coverageEvidence.status, "satisfied")
+assert.equal(filesExtractedData.coverageEvidence.observedScanAttempts, 2)
 
 const actionObserveRun = spawnSync(
   process.execPath,
@@ -595,6 +641,18 @@ function assertTargetLoopMetadata(trace) {
   )
   assert(settledResults.length > 0)
   assert(settledResults.every((event) => event.result?.metadata?.settleRequired === true))
+  assert(settledResults.every((event) => event.actionTraceStep?.verification.hasAfterObservation))
+  assert(
+    settledResults.every(
+      (event) => event.result?.metadata?.actionTraceStep?.verification?.hasAfterObservation,
+    ),
+  )
+  assert(
+    settledResults.every(
+      (event) =>
+        event.actionTraceStep?.execution.inputBackend?.backend || event.action?.kind === "observe",
+    ),
+  )
 }
 
 function writeLoopHelper(scenario) {
@@ -689,7 +747,9 @@ lines.on("line", (line) => {
   }
 
   if (request.method === "scroll") {
-    if (scenario === "unstable-until-max" && stage === "albums-top") {
+    if (scenario === "files-largest" && stage === "home") {
+      stage = "files-bottom"
+    } else if (scenario === "unstable-until-max" && stage === "albums-top") {
       stage = "albums-middle"
     } else if (scenario === "unstable-until-max" && stage === "albums-middle") {
       stage = "albums-bottom"
@@ -710,7 +770,9 @@ lines.on("line", (line) => {
   }
 
   if (request.method === "drag") {
-    if (scenario === "unstable-until-max" && stage === "albums-top") {
+    if (scenario === "files-largest" && stage === "home") {
+      stage = "files-bottom"
+    } else if (scenario === "unstable-until-max" && stage === "albums-top") {
       stage = "albums-middle"
     } else if (scenario === "unstable-until-max" && stage === "albums-middle") {
       stage = "albums-bottom"
@@ -804,6 +866,30 @@ function observation(target) {
 }
 
 function elements(target) {
+  if (scenario === "files-largest" && stage === "files-bottom") {
+    return [
+      element(target, "heading:downloads", "AXStaticText", "Downloads", 120, 180),
+      element(target, "file:video", "AXStaticText", "meeting.mov", 120, 250),
+      element(target, "size:video", "AXStaticText", "900 MB", 430, 250),
+      element(target, "file:data", "AXStaticText", "dataset.parquet", 120, 320),
+      element(target, "size:data", "AXStaticText", "2.4 GB", 430, 320),
+      element(target, "file:archive", "AXStaticText", "archive.zip", 120, 390),
+      element(target, "size:archive", "AXStaticText", "1.1 GB", 430, 390),
+    ]
+  }
+
+  if (scenario === "files-largest") {
+    return [
+      element(target, "heading:downloads", "AXStaticText", "Downloads", 120, 180),
+      element(target, "file:readme", "AXStaticText", "readme.txt", 120, 250),
+      element(target, "size:readme", "AXStaticText", "12 KB", 430, 250),
+      element(target, "file:photo", "AXStaticText", "photo.png", 120, 320),
+      element(target, "size:photo", "AXStaticText", "5 MB", 430, 320),
+      element(target, "file:video", "AXStaticText", "meeting.mov", 120, 390),
+      element(target, "size:video", "AXStaticText", "900 MB", 430, 390),
+    ]
+  }
+
   const search = element(target, "search", "AXTextField", "搜索", 120, 120, 360, 32)
   if (stage === "albums-top") {
     return [
@@ -981,6 +1067,18 @@ function albumNamesOnlyObservation() {
     element("album:magic", "AXStaticText", "魔杰座", 430, 250),
     element("album:sun", "AXStaticText", "太阳之子", 430, 320),
     element("album:bedtime", "AXStaticText", "周杰伦的床边故事", 430, 390),
+  ])
+}
+
+function downloadsFilesObservation() {
+  return observation([
+    element("heading:downloads", "AXStaticText", "Downloads", 120, 180),
+    element("file:readme", "AXStaticText", "readme.txt", 120, 250),
+    element("size:readme", "AXStaticText", "12 KB", 430, 250),
+    element("file:video", "AXStaticText", "meeting.mov", 120, 320),
+    element("size:video", "AXStaticText", "900 MB", 430, 320),
+    element("file:data", "AXStaticText", "dataset.parquet", 120, 390),
+    element("size:data", "AXStaticText", "2.4 GB", 430, 390),
   ])
 }
 

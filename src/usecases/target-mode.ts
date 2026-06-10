@@ -44,13 +44,21 @@ export interface TargetModeCoverageState {
 export interface EntityCandidate {
   key: string
   fields: Record<string, string>
-  title?: string
-  artist?: string
-  releaseDate?: string
+  label?: string
+  ranking?: CandidateRankingValue
+  evidenceText: string[]
   source: "list" | "detail"
   confidence: number
   missingFields: string[]
   element?: ElementRef
+}
+
+export interface CandidateRankingValue {
+  field: string
+  raw: string
+  value: string
+  type: "date" | "file-size" | "number" | "text"
+  numeric?: number
 }
 
 export interface TargetModeDecision {
@@ -78,6 +86,9 @@ interface EntryRegion {
 }
 
 const DATE_PATTERN = /\b(\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?)\b/
+const FILE_SIZE_PATTERN =
+  /\b(\d+(?:\.\d+)?)\s*(bytes?|b|kb|kib|mb|mib|gb|gib|tb|tib|字节|千字节|兆字节|吉字节)\b/i
+const NUMBER_PATTERN = /\b\d+(?:\.\d+)?\b/
 const DEFAULT_MAX_ITERATIONS = 12
 const GENERIC_NAVIGATION_STEPS = ["scroll down 5", "press key PageDown"]
 const DEFAULT_MAX_SCAN_ATTEMPTS = 3
@@ -758,38 +769,46 @@ function rankedCandidates(goal: UseCaseGoal, observation: Observation): EntityCa
 function listCandidates(goal: UseCaseGoal, observation: Observation): EntityCandidate[] {
   const entries = visibleEntries(observation)
   const resultEntries = entriesInResultRegion(goal, entries, observation)
-  const dateEntries = resultEntries.filter((entry) => DATE_PATTERN.test(entry.text))
+  const rankedEntries = resultEntries
+    .map((entry) => ({ entry, ranking: rankingValueFromText(goal, entry.text) }))
+    .filter(
+      (candidate): candidate is { entry: VisibleEntry; ranking: CandidateRankingValue } =>
+        candidate.ranking !== undefined,
+    )
   const candidates: EntityCandidate[] = []
 
-  for (const dateEntry of dateEntries) {
-    const releaseDate = normalizeDate(dateEntry.text.match(DATE_PATTERN)?.[1] ?? "")
-    const inlineCandidate = inlineCandidateFromEntry(goal, dateEntry, releaseDate)
+  for (const { entry: rankEntry, ranking } of rankedEntries) {
+    const inlineCandidate = inlineCandidateFromEntry(goal, rankEntry, ranking)
     if (inlineCandidate) {
       candidates.push(inlineCandidate)
     }
 
-    const cardCandidate = cardCandidateFromDateEntry(goal, dateEntry, resultEntries, releaseDate)
+    const cardCandidate = cardCandidateFromRankEntry(goal, rankEntry, resultEntries, ranking)
     if (cardCandidate) {
       candidates.push(cardCandidate)
     }
 
-    const neighbors = nearbyEntries(dateEntry, resultEntries)
-    const artist = artistFromEntries(goal, neighbors)
-    const titleEntry = titleEntryFromRow(neighbors, dateEntry, artist)
-    if (!releaseDate || !titleEntry) {
+    const neighbors = nearbyEntries(rankEntry, resultEntries)
+    const constrainedFields = constraintFieldsFromEntries(goal, neighbors)
+    if (!constraintsSatisfied(goal, constrainedFields, neighbors)) {
+      continue
+    }
+
+    const labelEntry = labelEntryFromRow(goal, neighbors, rankEntry, constrainedFields)
+    if (!labelEntry) {
       continue
     }
 
     candidates.push({
-      key: candidateKey("list", titleEntry.text, artist, releaseDate),
-      fields: candidateFields(titleEntry.text, artist, releaseDate),
-      title: titleEntry.text,
-      artist,
-      releaseDate,
+      key: candidateKey("list", labelEntry.text, ranking, constrainedFields),
+      fields: candidateFields(goal, labelEntry.text, ranking, constrainedFields),
+      label: labelEntry.text,
+      ranking,
+      evidenceText: evidenceText([rankEntry, ...neighbors]),
       source: "list",
-      confidence: (artist ? 0.7 : 0.45) + (titleEntry.element ? 0.1 : 0),
+      confidence: (Object.keys(constrainedFields).length > 0 ? 0.7 : 0.45) + 0.1,
       missingFields: [],
-      element: titleEntry.element,
+      element: labelEntry.element,
     })
   }
 
@@ -799,37 +818,51 @@ function listCandidates(goal: UseCaseGoal, observation: Observation): EntityCand
 function detailCandidates(goal: UseCaseGoal, observation: Observation): EntityCandidate[] {
   const entries = visibleEntries(observation)
   const resultEntries = entriesInResultRegion(goal, entries, observation)
-  const detailSignal = hasDetailSignal(entries)
-  const releaseDateEntry =
-    resultEntries.find((entry) => isReleaseDateText(entry.text)) ??
-    (detailSignal ? resultEntries.find((entry) => DATE_PATTERN.test(entry.text)) : undefined)
-  const dateEntry = releaseDateEntry
-  const releaseDate = normalizeDate(dateEntry?.text.match(DATE_PATTERN)?.[1] ?? "")
-  const artist =
-    detailFieldValue(resultEntries, ["歌手", "artist"]) ?? artistFromEntries(goal, resultEntries)
-  const stackedCandidate = dateEntry
-    ? cardCandidateFromDateEntry(goal, dateEntry, resultEntries, releaseDate)
-    : undefined
-  const titleEntry = stackedCandidate
-    ? { text: stackedCandidate.title ?? "", element: stackedCandidate.element }
-    : detailTitleEntry(resultEntries, artist, dateEntry)
-  const candidateArtist = stackedCandidate?.artist ?? artist
+  const detailFields = labeledFields(goal, resultEntries)
+  const detailSignal = hasDetailSignal(goal, entries, detailFields)
+  const rankEntry =
+    resultEntries.find(
+      (entry) => labeledFieldName(entry.text) === normalizeFieldName(goal.orderBy?.field ?? ""),
+    ) ??
+    (detailSignal
+      ? resultEntries.find((entry) => rankingValueFromText(goal, entry.text))
+      : undefined)
+  const ranking = rankingValueFromText(
+    goal,
+    detailFields[goal.orderBy?.field ?? ""] ?? rankEntry?.text ?? "",
+  )
+  const constrainedFields = {
+    ...constraintFieldsFromEntries(goal, resultEntries),
+    ...matchingDetailConstraintFields(goal, detailFields),
+  }
+  const stackedCandidate =
+    rankEntry && ranking
+      ? cardCandidateFromRankEntry(goal, rankEntry, resultEntries, ranking)
+      : undefined
+  const labelEntry = stackedCandidate
+    ? { text: stackedCandidate.label ?? "", element: stackedCandidate.element }
+    : detailLabelEntry(goal, resultEntries, constrainedFields, rankEntry)
 
-  if (!releaseDate || !titleEntry?.text || !detailSignal) {
+  if (!ranking || !labelEntry?.text || !detailSignal) {
     return []
+  }
+
+  const fields = {
+    ...candidateFields(goal, labelEntry.text, ranking, constrainedFields),
+    ...detailFields,
   }
 
   return [
     {
-      key: candidateKey("detail", titleEntry.text, candidateArtist, releaseDate),
-      fields: candidateFields(titleEntry.text, candidateArtist, releaseDate),
-      title: titleEntry.text,
-      artist: candidateArtist,
-      releaseDate,
+      key: candidateKey("detail", labelEntry.text, ranking, constrainedFields),
+      fields,
+      label: labelEntry.text,
+      ranking,
+      evidenceText: evidenceText(resultEntries),
       source: "detail",
       confidence: 0.95,
       missingFields: [],
-      element: titleEntry.element,
+      element: labelEntry.element,
     },
   ]
 }
@@ -984,55 +1017,45 @@ function nearbyEntries(anchor: VisibleEntry, entries: VisibleEntry[]): VisibleEn
     )
 }
 
-function artistFromEntries(goal: UseCaseGoal, entries: VisibleEntry[]): string | undefined {
-  const requestedArtist = constraintValue(goal, "artist")
-  if (requestedArtist) {
-    return entries.find((entry) => normalize(entry.text).includes(normalize(requestedArtist)))?.text
-  }
-
-  return entries
-    .map((entry) => entry.text.trim())
-    .filter((text) => text && !DATE_PATTERN.test(text))
-    .filter((text) => !isChromeOrControlText(text))
-    .filter((text) => !isKnownTabLabel(text))
-    .find((text) => text.length <= 40)
-}
-
-function titleEntryFromRow(
+function labelEntryFromRow(
+  goal: UseCaseGoal,
   entries: VisibleEntry[],
-  dateEntry: VisibleEntry,
-  artist: string | undefined,
+  rankEntry: VisibleEntry,
+  constrainedFields: Record<string, string>,
 ): VisibleEntry | undefined {
   const ignored = new Set(
-    [dateEntry.text, artist].filter((value): value is string => Boolean(value)),
+    [rankEntry.text, ...Object.values(constrainedFields)].filter((value) => value !== ""),
   )
 
   return entries
     .filter((entry) => !ignored.has(entry.text))
     .filter(isCandidateTextEntry)
-    .sort((left, right) => titleScore(right.text) - titleScore(left.text))[0]
+    .sort((left, right) => labelScore(goal, right.text) - labelScore(goal, left.text))[0]
 }
 
-function detailTitleEntry(
+function detailLabelEntry(
+  goal: UseCaseGoal,
   entries: VisibleEntry[],
-  artist: string | undefined,
-  dateEntry: VisibleEntry | undefined,
+  constrainedFields: Record<string, string>,
+  rankEntry: VisibleEntry | undefined,
 ): VisibleEntry | undefined {
   const ignored = new Set(
-    [artist, dateEntry?.text].filter((value): value is string => Boolean(value)),
+    [rankEntry?.text, ...Object.values(constrainedFields)].filter(
+      (value): value is string => typeof value === "string" && value !== "",
+    ),
   )
-  const detailY = dateEntry?.y
+  const detailY = rankEntry?.y
 
   return entries
     .filter((entry) => !ignored.has(entry.text))
     .filter((entry) => !entry.text.includes(":") && !entry.text.includes("："))
     .filter(isCandidateTextEntry)
     .filter((entry) => (detailY === undefined || entry.y === undefined ? true : entry.y <= detailY))
-    .sort((left, right) => detailTitleScore(right) - detailTitleScore(left))[0]
+    .sort((left, right) => detailLabelScore(goal, right) - detailLabelScore(goal, left))[0]
 }
 
-function detailTitleScore(entry: VisibleEntry): number {
-  let score = titleScore(entry.text)
+function detailLabelScore(goal: UseCaseGoal, entry: VisibleEntry): number {
+  let score = labelScore(goal, entry.text)
   if (entry.y !== undefined) {
     score += Math.max(0, 1000 - entry.y) / 100
   }
@@ -1042,24 +1065,68 @@ function detailTitleScore(entry: VisibleEntry): number {
   return score
 }
 
-function detailFieldValue(entries: VisibleEntry[], labels: string[]): string | undefined {
-  const normalizedLabels = labels.map(normalize)
+function labeledFields(goal: UseCaseGoal, entries: VisibleEntry[]): Record<string, string> {
+  const fields: Record<string, string> = {}
+  const knownFields = uniqueStrings([
+    ...goal.requiredFields,
+    ...(goal.orderBy?.field ? [goal.orderBy.field] : []),
+    ...Object.keys(goal.constraints ?? {}),
+  ])
 
   for (const entry of entries) {
     const text = entry.text.trim()
-    const normalizedText = normalize(text)
-    const label = normalizedLabels.find((candidate) => normalizedText.includes(candidate))
+    const label = labeledFieldName(text)
     if (!label) {
       continue
     }
 
-    const match = text.match(/[:：]\s*(.+)$/)
-    if (match?.[1]) {
-      return match[1].trim()
+    const field = resolveKnownField(label, knownFields)
+    const value = text.match(/[:：]\s*(.+)$/)?.[1]?.trim()
+    if (field && value) {
+      fields[field] = value
     }
   }
 
-  return undefined
+  return fields
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    const key = normalizeFieldName(value)
+    if (!key || seen.has(key)) {
+      return false
+    }
+
+    seen.add(key)
+    return true
+  })
+}
+
+function labeledFieldName(value: string): string | undefined {
+  const match = value.match(/^([^:：]{1,32})[:：]\s*.+$/)
+  return match?.[1] ? normalizeFieldName(match[1]) : undefined
+}
+
+function resolveKnownField(label: string, fields: string[]): string | undefined {
+  return fields.find((field) => labelsMatchField(label, normalizeFieldName(field)))
+}
+
+function labelsMatchField(label: string, field: string): boolean {
+  if (label === field) {
+    return true
+  }
+
+  const aliases: Record<string, string[]> = {
+    artist: ["歌手", "艺人", "演唱者"],
+    releasedate: ["发行日期", "发行时间", "日期", "时间"],
+    filesize: ["大小", "文件大小", "尺寸"],
+    size: ["大小", "文件大小", "尺寸"],
+    name: ["名称", "标题", "名字"],
+    title: ["名称", "标题", "名字"],
+  }
+
+  return (aliases[field] ?? []).some((alias) => normalizeFieldName(alias) === label)
 }
 
 function candidatePayload(
@@ -1079,9 +1146,11 @@ function candidatePayload(
 
   payload.sourceEvidence = [
     `source=${candidate.source}`,
-    candidate.title ? `title=${candidate.title}` : undefined,
-    candidate.artist ? `artist=${candidate.artist}` : undefined,
-    candidate.releaseDate ? `releaseDate=${candidate.releaseDate}` : undefined,
+    candidate.label ? `label=${candidate.label}` : undefined,
+    candidate.ranking ? `ranking=${candidate.ranking.field}:${candidate.ranking.value}` : undefined,
+    candidate.evidenceText.length > 0
+      ? `evidence=${candidate.evidenceText.join(" | ")}`
+      : undefined,
     coverage ? `coverage=${coverageSummary(coverage)}` : undefined,
   ]
     .filter((entry): entry is string => Boolean(entry))
@@ -1160,19 +1229,29 @@ function coverageSummary(coverage: JsonObject): string {
 }
 
 function candidateFields(
-  title: string | undefined,
-  artist: string | undefined,
-  releaseDate: string | undefined,
+  goal: UseCaseGoal,
+  label: string | undefined,
+  ranking: CandidateRankingValue | undefined,
+  constrainedFields: Record<string, string>,
 ): Record<string, string> {
-  return Object.fromEntries(
-    [
-      ["title", title],
-      ["name", title],
-      ["albumName", title],
-      ["artist", artist],
-      ["releaseDate", releaseDate],
-    ].filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""),
-  )
+  const entityNameField = goal.entity ? `${goal.entity}Name` : undefined
+  const fields: Record<string, string> = {
+    ...constrainedFields,
+  }
+
+  if (label) {
+    fields.name = label
+    fields.title = label
+    if (entityNameField) {
+      fields[entityNameField] = label
+    }
+  }
+
+  if (ranking) {
+    fields[ranking.field] = ranking.value
+  }
+
+  return fields
 }
 
 function candidateValue(candidate: EntityCandidate, field: string): string | undefined {
@@ -1184,21 +1263,12 @@ function candidateValue(candidate: EntityCandidate, field: string): string | und
     return explicit
   }
 
-  if (
-    normalized === "name" ||
-    normalized === "title" ||
-    normalized.includes("albumname") ||
-    normalized === "专辑名"
-  ) {
-    return candidate.title
+  if (normalized === "name" || normalized === "title" || normalized.endsWith("name")) {
+    return candidate.label
   }
 
-  if (normalized.includes("artist") || normalized.includes("歌手") || normalized.includes("艺人")) {
-    return candidate.artist
-  }
-
-  if (normalized.includes("date") || normalized.includes("time") || normalized.includes("发行")) {
-    return candidate.releaseDate
+  if (candidate.ranking && normalizeFieldName(candidate.ranking.field) === normalized) {
+    return candidate.ranking.value
   }
 
   return undefined
@@ -1209,9 +1279,15 @@ function missingFields(goal: UseCaseGoal, candidate: EntityCandidate): string[] 
 }
 
 function matchesConstraints(goal: UseCaseGoal, candidate: EntityCandidate): boolean {
-  const artist = constraintValue(goal, "artist")
-  if (artist && !normalize(candidate.artist).includes(normalize(artist))) {
-    return false
+  for (const [field, expected] of Object.entries(goal.constraints ?? {})) {
+    const explicit = candidateValue(candidate, field)
+    const haystack = [explicit, ...Object.values(candidate.fields), ...candidate.evidenceText]
+      .filter((value): value is string => typeof value === "string")
+      .map(normalize)
+
+    if (!haystack.some((value) => value.includes(normalize(expected)))) {
+      return false
+    }
   }
 
   return true
@@ -1222,15 +1298,13 @@ function compareCandidates(
   left: EntityCandidate,
   right: EntityCandidate,
 ): number {
-  const field = normalizeFieldName(goal.orderBy?.field ?? "releaseDate")
+  const field = normalizeFieldName(goal.orderBy?.field ?? "")
   const direction = goal.orderBy?.direction ?? "desc"
-  let delta = right.confidence - left.confidence
-
-  if (field.includes("date") || field.includes("time") || field.includes("发行")) {
-    delta =
-      Date.parse(right.releaseDate ?? "") - Date.parse(left.releaseDate ?? "") ||
-      right.confidence - left.confidence
-  }
+  const leftRank = rankForCandidate(left, field)
+  const rightRank = rankForCandidate(right, field)
+  const delta =
+    comparableRankValue(rightRank) - comparableRankValue(leftRank) ||
+    right.confidence - left.confidence
 
   return direction === "desc" ? delta : -delta
 }
@@ -1261,6 +1335,7 @@ function hasResultContext(goal: UseCaseGoal, observation: Observation): boolean 
   return (
     queryVisible(goal, observation) &&
     (hasSearchResultHeading(goal, entries) ||
+      (goal.navigation?.semanticTabs?.length ?? 0) === 0 ||
       (hasConfiguredSemanticTab(goal, entries) && hasSemanticNavigationRow(entries)))
   )
 }
@@ -1355,24 +1430,30 @@ function hasKnownTabRowPeers(entry: VisibleEntry, entries: VisibleEntry[]): bool
 
 function hasCandidateShape(observation: Observation): boolean {
   const entries = visibleEntries(observation)
-  return entries.some((entry) => DATE_PATTERN.test(entry.text)) && entries.length >= 3
+  return (
+    entries.some((entry) => rankingValueFromText({ requiredFields: [] }, entry.text)) &&
+    entries.length >= 3
+  )
 }
 
-function hasDetailSignal(entries: VisibleEntry[]): boolean {
-  return entries.some((entry) => isReleaseDateText(entry.text) || isDetailMetricText(entry.text))
+function hasDetailSignal(
+  goal: UseCaseGoal,
+  entries: VisibleEntry[],
+  fields: Record<string, string>,
+): boolean {
+  return (
+    Object.keys(fields).length > 0 ||
+    entries.some((entry) => isOrderedFieldText(goal, entry.text) || isDetailMetricText(entry.text))
+  )
 }
 
 function isDetailMetricText(value: string): boolean {
   const normalized = normalize(value)
   return (
-    /^(曲目数?|tracks?)\s*[:：]/i.test(value.trim()) ||
-    /^歌曲\s*\d+$/i.test(value.trim()) ||
-    normalized === "曲目" ||
-    normalized === "曲目数" ||
-    normalized === "专辑信息" ||
-    normalized.includes("立即购买") ||
-    normalized.includes("播放全部") ||
-    normalized === "tracks"
+    /^(details?|info|metadata|summary|属性|详情|信息)\s*[:：]?/i.test(value.trim()) ||
+    normalized === "详情" ||
+    normalized === "信息" ||
+    normalized === "属性"
   )
 }
 
@@ -1381,12 +1462,240 @@ function isReleaseDateText(value: string): boolean {
   return DATE_PATTERN.test(value) && (normalized.includes("发行") || normalized.includes("release"))
 }
 
-function constraintValue(goal: UseCaseGoal, field: string): string | undefined {
+function isOrderedFieldText(goal: UseCaseGoal, value: string): boolean {
+  const label = labeledFieldName(value)
+  return Boolean(label && labelsMatchField(label, normalizeFieldName(goal.orderBy?.field ?? "")))
+}
+
+function rankForCandidate(
+  candidate: EntityCandidate,
+  normalizedField: string,
+): CandidateRankingValue | undefined {
+  if (!candidate.ranking) {
+    return undefined
+  }
+
+  if (!normalizedField || normalizeFieldName(candidate.ranking.field) === normalizedField) {
+    return candidate.ranking
+  }
+
+  return undefined
+}
+
+function comparableRankValue(ranking: CandidateRankingValue | undefined): number {
+  if (!ranking) {
+    return Number.NEGATIVE_INFINITY
+  }
+
+  if (typeof ranking.numeric === "number" && Number.isFinite(ranking.numeric)) {
+    return ranking.numeric
+  }
+
+  return ranking.value ? 0 : Number.NEGATIVE_INFINITY
+}
+
+function rankingValueFromText(
+  goal: Pick<UseCaseGoal, "orderBy" | "requiredFields">,
+  text: string,
+): CandidateRankingValue | undefined {
+  const field = goal.orderBy?.field ?? inferredRankingField(goal.requiredFields)
   const normalizedField = normalizeFieldName(field)
 
-  return Object.entries(goal.constraints ?? {}).find(
-    ([key]) => normalizeFieldName(key) === normalizedField,
-  )?.[1]
+  if (isFileSizeField(normalizedField)) {
+    return fileSizeRanking(field, text)
+  }
+
+  if (isDateField(normalizedField)) {
+    return dateRanking(field, text)
+  }
+
+  if (isNumberField(normalizedField)) {
+    return numberRanking(field, text)
+  }
+
+  return (
+    dateRanking(field || "date", text) ??
+    fileSizeRanking(field || "size", text) ??
+    numberRanking(field || "number", text)
+  )
+}
+
+function inferredRankingField(requiredFields: string[]): string {
+  return (
+    requiredFields.find((field) => {
+      const normalized = normalizeFieldName(field)
+      return isDateField(normalized) || isFileSizeField(normalized) || isNumberField(normalized)
+    }) ?? ""
+  )
+}
+
+function dateRanking(field: string, text: string): CandidateRankingValue | undefined {
+  const value = normalizeDate(text)
+  if (!value) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: text,
+    value,
+    type: "date",
+    numeric: Date.parse(value),
+  }
+}
+
+function fileSizeRanking(field: string, text: string): CandidateRankingValue | undefined {
+  const match = text.match(FILE_SIZE_PATTERN)
+  if (!match?.[1] || !match[2]) {
+    return undefined
+  }
+
+  const amount = Number(match[1])
+  const multiplier = fileSizeMultiplier(match[2])
+  if (!Number.isFinite(amount) || multiplier === undefined) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: match[0],
+    value: match[0],
+    type: "file-size",
+    numeric: amount * multiplier,
+  }
+}
+
+function numberRanking(field: string, text: string): CandidateRankingValue | undefined {
+  const match = text.match(NUMBER_PATTERN)
+  if (!match?.[0]) {
+    return undefined
+  }
+
+  const value = Number(match[0])
+  if (!Number.isFinite(value)) {
+    return undefined
+  }
+
+  return {
+    field,
+    raw: match[0],
+    value: match[0],
+    type: "number",
+    numeric: value,
+  }
+}
+
+function fileSizeMultiplier(unit: string): number | undefined {
+  const normalized = unit.toLowerCase()
+  const units: Record<string, number> = {
+    b: 1,
+    byte: 1,
+    bytes: 1,
+    kb: 1024,
+    kib: 1024,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+    tb: 1024 ** 4,
+    tib: 1024 ** 4,
+    字节: 1,
+    千字节: 1024,
+    兆字节: 1024 ** 2,
+    吉字节: 1024 ** 3,
+  }
+
+  return units[normalized]
+}
+
+function isDateField(field: string): boolean {
+  return (
+    field.includes("date") ||
+    field.includes("time") ||
+    field.includes("日期") ||
+    field.includes("时间") ||
+    field.includes("发行")
+  )
+}
+
+function isFileSizeField(field: string): boolean {
+  return (
+    field.includes("size") ||
+    field.includes("bytes") ||
+    field.includes("大小") ||
+    field.includes("文件大小")
+  )
+}
+
+function isNumberField(field: string): boolean {
+  return (
+    field.includes("count") ||
+    field.includes("number") ||
+    field.includes("score") ||
+    field.includes("hot") ||
+    field.includes("热度") ||
+    field.includes("数量")
+  )
+}
+
+function constraintFieldsFromEntries(
+  goal: UseCaseGoal,
+  entries: VisibleEntry[],
+): Record<string, string> {
+  const fields: Record<string, string> = {}
+
+  for (const [field, expected] of Object.entries(goal.constraints ?? {})) {
+    const match = entries.find((entry) => normalize(entry.text).includes(normalize(expected)))
+    if (match) {
+      fields[field] = match.text
+    }
+  }
+
+  return fields
+}
+
+function matchingDetailConstraintFields(
+  goal: UseCaseGoal,
+  fields: Record<string, string>,
+): Record<string, string> {
+  const matched: Record<string, string> = {}
+
+  for (const [field, expected] of Object.entries(goal.constraints ?? {})) {
+    const value = Object.entries(fields).find(
+      ([key]) => normalizeFieldName(key) === normalizeFieldName(field),
+    )?.[1]
+    if (value && normalize(value).includes(normalize(expected))) {
+      matched[field] = value
+    }
+  }
+
+  return matched
+}
+
+function constraintsSatisfied(
+  goal: UseCaseGoal,
+  fields: Record<string, string>,
+  entries: VisibleEntry[],
+): boolean {
+  for (const [field, expected] of Object.entries(goal.constraints ?? {})) {
+    const explicit = fields[field]
+    const visible = entries.some((entry) => normalize(entry.text).includes(normalize(expected)))
+    if (!normalize(explicit).includes(normalize(expected)) && !visible) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function evidenceText(entries: VisibleEntry[]): string[] {
+  return Array.from(
+    new Set(
+      entries
+        .map((entry) => entry.text.trim())
+        .filter((text) => text && !isChromeOrControlText(text)),
+    ),
+  ).slice(0, 12)
 }
 
 function extractionDescription(goal: UseCaseGoal): string {
@@ -1400,23 +1709,41 @@ function candidateToJson(candidate: EntityCandidate): JsonObject {
     confidence: candidate.confidence,
     missingFields: candidate.missingFields,
     fields: candidate.fields,
-    ...(candidate.title ? { title: candidate.title } : {}),
-    ...(candidate.artist ? { artist: candidate.artist } : {}),
-    ...(candidate.releaseDate ? { releaseDate: candidate.releaseDate } : {}),
+    evidenceText: candidate.evidenceText,
+    ...(candidate.label ? { label: candidate.label } : {}),
+    ...(candidate.ranking ? { ranking: rankingToJson(candidate.ranking) } : {}),
+  }
+}
+
+export function rankingToJson(ranking: CandidateRankingValue): JsonObject {
+  return {
+    field: ranking.field,
+    raw: ranking.raw,
+    value: ranking.value,
+    type: ranking.type,
+    ...(typeof ranking.numeric === "number" ? { numeric: ranking.numeric } : {}),
   }
 }
 
 function candidateLabel(candidate: EntityCandidate): string {
-  return candidate.title ?? candidate.fields.title ?? candidate.fields.name ?? candidate.key
+  return candidate.label ?? candidate.fields.title ?? candidate.fields.name ?? candidate.key
 }
 
 function candidateKey(
   source: EntityCandidate["source"],
-  title: string | undefined,
-  artist: string | undefined,
-  releaseDate: string | undefined,
+  label: string | undefined,
+  ranking: CandidateRankingValue | undefined,
+  constrainedFields: Record<string, string>,
 ): string {
-  return [source, title ?? "", artist ?? "", releaseDate ?? ""].map(normalize).join("|")
+  return [
+    source,
+    label ?? "",
+    ranking?.field ?? "",
+    ranking?.value ?? "",
+    ...Object.entries(constrainedFields).map(([key, value]) => `${key}:${value}`),
+  ]
+    .map(normalize)
+    .join("|")
 }
 
 function normalizeDate(value: string): string {
@@ -1451,13 +1778,16 @@ function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
 }
 
-function titleScore(text: string): number {
+function labelScore(goal: Pick<UseCaseGoal, "entity">, text: string): number {
   let score = 0
   if (text.length > 1 && text.length <= 80) {
     score += 20
   }
   if (/[\u4e00-\u9fa5A-Za-z0-9]/.test(text)) {
     score += 10
+  }
+  if (goal.entity && normalizeFieldName(text) === normalizeFieldName(goal.entity)) {
+    score -= 10
   }
   if (text.includes("：") || text.includes(":")) {
     score -= 10
@@ -1468,8 +1798,8 @@ function titleScore(text: string): number {
 function isCandidateTextEntry(entry: VisibleEntry): boolean {
   const text = entry.text.trim()
   return (
-    titleScore(text) > 0 &&
-    !DATE_PATTERN.test(text) &&
+    labelScore({ entity: "" }, text) > 0 &&
+    !rankingValueFromText({ requiredFields: [] }, text) &&
     !isChromeOrControlText(text) &&
     !isKnownTabLabel(text)
   )
@@ -1524,29 +1854,24 @@ function isChromeOrControlText(value: string): boolean {
 function inlineCandidateFromEntry(
   goal: UseCaseGoal,
   entry: VisibleEntry,
-  releaseDate: string,
+  ranking: CandidateRankingValue,
 ): EntityCandidate | undefined {
-  if (!releaseDate) {
+  const constrainedFields = constraintFieldsFromEntries(goal, [entry])
+  if (!constraintsSatisfied(goal, constrainedFields, [entry])) {
     return undefined
   }
 
-  const requestedArtist = constraintValue(goal, "artist")
-  if (requestedArtist && !normalize(entry.text).includes(normalize(requestedArtist))) {
-    return undefined
-  }
-
-  const artist = requestedArtist ?? artistFromEntries(goal, [entry])
-  const title = inlineTitle(entry.text, artist)
-  if (!title) {
+  const label = inlineLabel(goal, entry.text, ranking, constrainedFields)
+  if (!label) {
     return undefined
   }
 
   return {
-    key: candidateKey("list", title, artist, releaseDate),
-    fields: candidateFields(title, artist, releaseDate),
-    title,
-    artist,
-    releaseDate,
+    key: candidateKey("list", label, ranking, constrainedFields),
+    fields: candidateFields(goal, label, ranking, constrainedFields),
+    label,
+    ranking,
+    evidenceText: evidenceText([entry]),
     source: "list",
     confidence: 0.72,
     missingFields: [],
@@ -1554,71 +1879,84 @@ function inlineCandidateFromEntry(
   }
 }
 
-function cardCandidateFromDateEntry(
+function cardCandidateFromRankEntry(
   goal: UseCaseGoal,
-  dateEntry: VisibleEntry,
+  rankEntry: VisibleEntry,
   entries: VisibleEntry[],
-  releaseDate: string,
+  ranking: CandidateRankingValue,
 ): EntityCandidate | undefined {
-  if (!releaseDate || dateEntry.x === undefined || dateEntry.y === undefined) {
+  if (rankEntry.x === undefined || rankEntry.y === undefined) {
     return undefined
   }
 
-  const dateX = dateEntry.x
-  const dateY = dateEntry.y
-  const requestedArtist = constraintValue(goal, "artist")
+  const rankX = rankEntry.x
+  const rankY = rankEntry.y
   const columnEntries = entries.filter((entry) => {
-    if (entry === dateEntry || entry.x === undefined || entry.y === undefined) {
+    if (entry === rankEntry || entry.x === undefined || entry.y === undefined) {
       return false
     }
 
-    return Math.abs(entry.x - dateX) <= 120 && entry.y <= dateY && dateY - entry.y <= 96
+    return Math.abs(entry.x - rankX) <= 120 && entry.y <= rankY && rankY - entry.y <= 96
   })
-  const artistEntry = requestedArtist
-    ? columnEntries.find((entry) => normalize(entry.text).includes(normalize(requestedArtist)))
-    : undefined
-  const artistY = artistEntry?.y
-  if (requestedArtist && !artistEntry) {
+  const constrainedFields = constraintFieldsFromEntries(goal, columnEntries)
+  if (!constraintsSatisfied(goal, constrainedFields, columnEntries)) {
     return undefined
   }
 
-  const titleEntry = columnEntries
-    .filter((entry) => entry !== artistEntry)
+  const constraintTop = constraintEntries(goal, columnEntries)
+    .map((entry) => entry.y)
+    .filter(isNumber)[0]
+  const labelEntry = columnEntries
+    .filter((entry) => !Object.values(constrainedFields).includes(entry.text))
     .filter(isCandidateTextEntry)
-    .filter((entry) => (artistY === undefined || entry.y === undefined ? true : entry.y < artistY))
+    .filter((entry) =>
+      constraintTop === undefined || entry.y === undefined ? true : entry.y < constraintTop,
+    )
     .sort((left, right) => (right.y ?? 0) - (left.y ?? 0))[0]
-  if (!titleEntry) {
+  if (!labelEntry) {
     return undefined
   }
-
-  const artist = requestedArtist ?? artistEntry?.text
 
   return {
-    key: candidateKey("list", titleEntry.text, artist, releaseDate),
-    fields: candidateFields(titleEntry.text, artist, releaseDate),
-    title: titleEntry.text,
-    artist,
-    releaseDate,
+    key: candidateKey("list", labelEntry.text, ranking, constrainedFields),
+    fields: candidateFields(goal, labelEntry.text, ranking, constrainedFields),
+    label: labelEntry.text,
+    ranking,
+    evidenceText: evidenceText([rankEntry, ...columnEntries]),
     source: "list",
     confidence: 0.82,
     missingFields: [],
-    element: titleEntry.element,
+    element: labelEntry.element,
   }
 }
 
-function inlineTitle(text: string, artist: string | undefined): string | undefined {
-  let title = text.replace(DATE_PATTERN, " ")
-  if (artist) {
-    title = title.replace(new RegExp(escapeRegExp(artist), "g"), " ")
+function inlineLabel(
+  goal: UseCaseGoal,
+  text: string,
+  ranking: CandidateRankingValue,
+  constrainedFields: Record<string, string>,
+): string | undefined {
+  let label = text.replace(ranking.raw, " ")
+  for (const value of Object.values(constrainedFields)) {
+    label = label.replace(new RegExp(escapeRegExp(value), "g"), " ")
   }
 
-  title = title
-    .replace(/(?:专辑|album|歌手|artist|发行日期|release\s*date)\s*[:：]?/gi, " ")
+  label = label
+    .replace(
+      /(?:name|title|date|time|size|artist|歌手|艺人|名称|标题|日期|时间|大小|发行日期)\s*[:：]?/gi,
+      " ",
+    )
     .replace(/[|｜,，;；·•]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
 
-  return titleScore(title) > 0 && !isChromeOrControlText(title) ? title : undefined
+  return labelScore(goal, label) > 0 && !isChromeOrControlText(label) ? label : undefined
+}
+
+function constraintEntries(goal: UseCaseGoal, entries: VisibleEntry[]): VisibleEntry[] {
+  return Object.values(goal.constraints ?? {}).flatMap((expected) =>
+    entries.filter((entry) => normalize(entry.text).includes(normalize(expected))),
+  )
 }
 
 function isScreenshotOcrEntry(entry: VisibleEntry): boolean {

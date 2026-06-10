@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { actionTraceStepMetadata, createActionTraceStep } from "../actions/action-trace-step.js"
 import { executeNativeAction } from "../actions/native-action-executor.js"
 import type { MacHelperClient, MacPermissionStatus } from "../adapters/mac/helper-protocol.js"
 import { MacHelperProcessClient } from "../adapters/mac/stdio-helper-client.js"
@@ -26,7 +27,7 @@ import {
   createTargetModeLoopState,
   targetModeLoopInitialSteps,
 } from "./target-loop.js"
-import type { TargetModePlannedStep } from "./target-mode.js"
+import { type TargetModePlannedStep, rankingToJson } from "./target-mode.js"
 import type { UseCase, UseCaseRunResult, UseCaseStepResult } from "./types.js"
 
 export interface NativeUseCaseRunnerOptions {
@@ -234,6 +235,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
       policy,
     })
 
+    const beforeObservation = currentObservation
     const execution =
       policy.status === "blocked"
         ? { result: createPolicyBlockedResult(action, policy), metadata: undefined }
@@ -285,6 +287,17 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
       }
     }
 
+    const actionTraceStep = createActionTraceStep({
+      action,
+      result,
+      before: beforeObservation,
+      after: execution.observation,
+      executionMetadata: execution.metadata,
+    })
+    result = withMetadata(result, {
+      actionTraceStep: actionTraceStepMetadata(actionTraceStep),
+    })
+
     appendTraceEvent(trace, {
       traceId,
       kind: "result",
@@ -292,6 +305,7 @@ async function runWithHelper(useCase: UseCase, helper: MacHelperClient): Promise
       action,
       policy,
       result,
+      actionTraceStep,
     })
 
     rememberNavigationAttempt(action, adaptiveState)
@@ -469,9 +483,9 @@ function targetModeDecisionMetadata(followUp: TargetModeLoopAdvance): JsonObject
       confidence: candidate.confidence,
       missingFields: candidate.missingFields,
       fields: candidate.fields,
-      ...(candidate.title ? { title: candidate.title } : {}),
-      ...(candidate.artist ? { artist: candidate.artist } : {}),
-      ...(candidate.releaseDate ? { releaseDate: candidate.releaseDate } : {}),
+      evidenceText: candidate.evidenceText,
+      ...(candidate.label ? { label: candidate.label } : {}),
+      ...(candidate.ranking ? { ranking: rankingToJson(candidate.ranking) } : {}),
     })),
     ...(followUp.step
       ? {

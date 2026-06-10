@@ -196,6 +196,13 @@ npm run build
 ```
 
 每个 action 都会执行 policy、必要的 observe-before、action、observe-after，并写入 trace。
+result trace event 会附加 `actionTraceStep`，用于审计这一轮闭环：
+
+- `before` / `after`：动作前后的 observation。
+- `execution.inputBackend`：真实输入后端，取值为 `ax-semantic`、`app-targeted-event` 或 `global-hid`。
+- `verification`：动作后观察是否完成、是否命中目标状态。
+- `virtualPointer`：harness 推断的指向位置，不是第二个系统鼠标。
+- `virtualPointerOverlay`：当 observation 带 screenshot 时生成的 SVG 指针 overlay。
 
 ### 5. 构建 Swift helper
 
@@ -223,7 +230,7 @@ swift build
 
 - CLI 返回 `ok: true`。
 - run status 为 `passed`（如果 app 已安装且有权限）。
-- trace 包含完整的 observation / action / policy / result 事件。
+- trace 包含完整的 observation / action / policy / result 事件，以及 result event 上的 `actionTraceStep`。
 - UC-110 会在 `/tmp/computer-use-harness/uc-110.txt` 留下真实文件。
 
 ## CLI

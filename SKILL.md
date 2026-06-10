@@ -38,7 +38,8 @@ computer-use trace --last [--pretty]
 
 - Use `computer-use usecases run ...` when the workflow is known and should be replayable as a named regression case.
 - Use `computer-use observe/click/type/key/scroll/...` when an agent or shell loop is deciding step-by-step from the current app state.
-- Every atomic action still does policy preflight, AX-first observation when needed, post-action observation, stable JSON output, and JSONL trace writing.
+- Every atomic action still does policy preflight, AX-first observation when needed, post-action observation, verification metadata, stable JSON output, and JSONL trace writing.
+- Result trace events carry `actionTraceStep`: before/after observation evidence, `execution.inputBackend` (`ax-semantic` / `app-targeted-event` / `global-hid`), verification status, and virtual pointer overlay metadata when a screenshot is available.
 
 - `apps` — list registered apps + their support level and adapters.
 - `capabilities --app <name>` — what the tool can do for one app.
@@ -65,7 +66,7 @@ computer-use trace --last [--pretty]
 
 Always check `ok` first. A business failure still returns valid JSON with `ok:false` and an `error.code` (e.g. `INVALID_RUN_MODE`, `UNKNOWN_USE_CASE`, `MISSING_APP_NAME`, `TRACE_NOT_FOUND`). Exit code: `0` ok, `2` usage/business error, `1` unexpected.
 
-An atomic action `data` carries: `mode: "native-action"`, `status`, `traceId`, `target`, `action`, `result`, optional final `observation`, full `trace[]`, and `tracePath`.
+An atomic action `data` carries: `mode: "native-action"`, `status`, `traceId`, `target`, `action`, `result`, optional final `observation`, full `trace[]`, and `tracePath`. Inspect the final result event's `actionTraceStep` before trusting an action as complete; it is the contract for observe -> action -> observe -> verify.
 
 A `usecases run` `data` carries: `caseId`, `title`, `status` (`passed`/…), `mode` (`fake`/`native`), `traceId`, `steps[]` (each with `description`/`status`), `success[]` (the asserted success criteria), `trace[]` (full event log), and `tracePath`. Traces are JSONL at `.computer-use/traces/<traceId>.jsonl`; the latest path is in `.computer-use/traces/last`.
 

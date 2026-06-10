@@ -844,8 +844,15 @@ private func performClick(action: [String: Any], actionId: String, method: Strin
     }
 
     if let point = actionPoint(action) {
-        activateTargetApp(app)
+        if postMouseClickToPid(app.processIdentifier, point: point) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["inputMethod": "pid-point", "x": point.x, "y": point.y]
+            )
+        }
 
+        activateTargetApp(app)
         if postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) {
             return passedActionResult(
                 actionId: actionId,
@@ -865,8 +872,19 @@ private func performClick(action: [String: Any], actionId: String, method: Strin
 
     guard let element = resolveActionElement(action, expectedPid: app.processIdentifier) else {
         if let point = actionElementFrameCenter(action) {
-            activateTargetApp(app)
+            if postMouseClickToPid(app.processIdentifier, point: point) {
+                return passedActionResult(
+                    actionId: actionId,
+                    method: method,
+                    metadata: [
+                        "inputMethod": "pid-synthetic-element-frame",
+                        "x": point.x,
+                        "y": point.y,
+                    ]
+                )
+            }
 
+            activateTargetApp(app)
             if postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) {
                 return passedActionResult(
                     actionId: actionId,
@@ -901,23 +919,20 @@ private func performClick(action: [String: Any], actionId: String, method: Strin
         return passedActionResult(actionId: actionId, method: method)
     }
 
-    if isQQMusicTarget(target) {
-        activateTargetApp(app)
-
-        if clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier) {
-            return passedActionResult(
-                actionId: actionId,
-                method: method,
-                metadata: ["inputMethod": "qqmusic-verified-hid-mouse"]
-            )
-        }
-    }
-
-    if isQQMusicTarget(target), clickElementCenterToPid(element, pid: app.processIdentifier) {
+    if clickElementCenterToPid(element, pid: app.processIdentifier) {
         return passedActionResult(
             actionId: actionId,
             method: method,
-            metadata: ["inputMethod": "qqmusic-pid-mouse"]
+            metadata: ["inputMethod": "pid-mouse"]
+        )
+    }
+
+    activateTargetApp(app)
+    if clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier) {
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["inputMethod": "verified-hid-mouse"]
         )
     }
 
@@ -1080,38 +1095,46 @@ private func performType(action: [String: Any], actionId: String, method: String
 
     guard let element = resolveActionElement(action, expectedPid: app.processIdentifier) else {
         if actionElementIsSynthetic(action), let point = actionElementFrameCenter(action) {
-            activateTargetApp(app)
+            if postMouseClickToPid(app.processIdentifier, point: point) {
+                usleep(200_000)
 
-            guard postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) else {
-                return failedActionResult(
-                    actionId: actionId,
-                    method: method,
-                    code: "ACTION_FAILED",
-                    message: "Refusing synthetic element type because target app is not the front layer-zero window at that point.",
-                    details: ["x": point.x, "y": point.y]
-                )
+                if pasteTextToPid(app.processIdentifier, text: text) {
+                    return passedActionResult(
+                        actionId: actionId,
+                        method: method,
+                        metadata: [
+                            "text": text,
+                            "inputMethod": "pid-synthetic-element-frame-paste",
+                            "x": point.x,
+                            "y": point.y,
+                        ]
+                    )
+                }
             }
 
-            usleep(200_000)
+            activateTargetApp(app)
+            if postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) {
+                usleep(200_000)
 
-            if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
-                return passedActionResult(
-                    actionId: actionId,
-                    method: method,
-                    metadata: [
-                        "text": text,
-                        "inputMethod": "verified-hid-synthetic-element-frame-paste",
-                        "x": point.x,
-                        "y": point.y,
-                    ]
-                )
+                if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
+                    return passedActionResult(
+                        actionId: actionId,
+                        method: method,
+                        metadata: [
+                            "text": text,
+                            "inputMethod": "verified-hid-synthetic-element-frame-paste",
+                            "x": point.x,
+                            "y": point.y,
+                        ]
+                    )
+                }
             }
 
             return failedActionResult(
                 actionId: actionId,
                 method: method,
                 code: "ACTION_FAILED",
-                message: "Synthetic element was focused but text paste failed.",
+                message: "Unable to focus or paste into synthetic element.",
                 details: ["x": point.x, "y": point.y]
             )
         }
@@ -1127,148 +1150,45 @@ private func performType(action: [String: Any], actionId: String, method: String
     let role = axString(element, kAXRoleAttribute)
     focusElement(element)
 
-    if isTextInputAXRole(role) {
-        if isAXAttributeSettable(element, kAXValueAttribute) {
-            let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
-            if error == .success {
-                return passedActionResult(actionId: actionId, method: method, metadata: ["text": text])
-            }
+    if isAXAttributeSettable(element, kAXValueAttribute) {
+        let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+        if error == .success {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "ax-value"]
+            )
         }
+    }
 
-        activateTargetApp(app)
-        focusElement(element)
+    if clickElementTextEntryPointToPid(element, pid: app.processIdentifier) ||
+        clickElementCenterToPid(element, pid: app.processIdentifier)
+    {
         usleep(200_000)
 
         if pasteTextToPid(app.processIdentifier, text: text) {
             return passedActionResult(
                 actionId: actionId,
                 method: method,
-                metadata: ["text": text, "inputMethod": "text-input-paste"]
+                metadata: ["text": text, "inputMethod": "pid-paste"]
             )
         }
-
-        return failedActionResult(
-            actionId: actionId,
-            method: method,
-            code: "ACTION_FAILED",
-            message: "Unable to paste text into text AX element.",
-            details: ["role": role ?? "unknown"]
-        )
-    }
-
-    if isSublimeTextTarget(target) {
-        activateTargetApp(app)
-        usleep(200_000)
-
-        guard pasteTextToPid(app.processIdentifier, text: text) else {
-            return failedActionResult(
-                actionId: actionId,
-                method: method,
-                code: "ACTION_FAILED",
-                message: "Unable to paste text into Sublime Text.",
-                details: ["role": role ?? "unknown"]
-            )
-        }
-
-        return passedActionResult(
-            actionId: actionId,
-            method: method,
-            metadata: ["text": text, "inputMethod": "sublime-text-pid-paste"]
-        )
-    }
-
-    guard isQQMusicTarget(target), isQQMusicSearchElement(element) else {
-        return failedActionResult(
-            actionId: actionId,
-            method: method,
-            code: "ACTION_FAILED",
-            message: "Refusing to type into non-text AX element without an app-specific adapter.",
-            details: ["role": role ?? "unknown"]
-        )
-    }
-
-    let valueSetError = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
-    if valueSetError == .success, qqMusicSearchContains(element, text: text) {
-        return passedActionResult(
-            actionId: actionId,
-            method: method,
-            metadata: ["text": text, "inputMethod": "qqmusic-ax-value"]
-        )
     }
 
     activateTargetApp(app)
-    let focusedByMouse = clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
-
-    guard focusedByMouse else {
-        return failedActionResult(
-            actionId: actionId,
-            method: method,
-            code: "ACTION_FAILED",
-            message: "Unable to focus QQ Music search element.",
-            details: ["role": axString(element, kAXRoleAttribute) ?? "unknown"]
-        )
-    }
-
-    usleep(200_000)
-    let inputElement = findQQMusicSearchElement(app: app) ?? element
-    focusElement(inputElement)
-
-    _ = clickElementTextEntryPointToHidWhenFrontmost(inputElement, pid: app.processIdentifier) ||
-        clickElementCenterToHidWhenFrontmost(inputElement, pid: app.processIdentifier)
+    focusElement(element)
     usleep(200_000)
 
-    _ = postKeyboardShortcutToHidWhenFrontmost(app.processIdentifier, keyCode: 0)
-    usleep(100_000)
-
-    if sendTextToHidWhenFrontmost(app.processIdentifier, text: text),
-       qqMusicSearchContains(inputElement, text: text) {
-        return passedActionResult(
-            actionId: actionId,
-            method: method,
-            metadata: ["text": text, "inputMethod": "qqmusic-hid-unicode"]
-        )
-    }
-
-    if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text),
-       qqMusicSearchContains(inputElement, text: text) {
-        return passedActionResult(
-            actionId: actionId,
-            method: method,
-            metadata: ["text": text, "inputMethod": "qqmusic-hid-paste"]
-        )
-    }
-
-    if pasteTextToPid(app.processIdentifier, text: text),
-       qqMusicSearchContains(inputElement, text: text) {
-        return passedActionResult(
-            actionId: actionId,
-            method: method,
-            metadata: ["text": text, "inputMethod": "qqmusic-pid-paste"]
-        )
-    }
-
-    if let refreshedInputElement = findQQMusicSearchElement(app: app),
-       clickElementTextEntryPointToHidWhenFrontmost(refreshedInputElement, pid: app.processIdentifier) {
+    if clickElementTextEntryPointToHidWhenFrontmost(element, pid: app.processIdentifier) ||
+        clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
+    {
         usleep(200_000)
 
-        _ = postKeyboardShortcutToHidWhenFrontmost(app.processIdentifier, keyCode: 0)
-        usleep(100_000)
-
-        if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text),
-           qqMusicSearchContains(refreshedInputElement, text: text) {
+        if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
             return passedActionResult(
                 actionId: actionId,
                 method: method,
-                metadata: ["text": text, "inputMethod": "qqmusic-hid-paste-entry-point"]
-            )
-        }
-
-        if pasteTextToPid(app.processIdentifier, text: text),
-           qqMusicSearchContains(refreshedInputElement, text: text) {
-            return passedActionResult(
-                actionId: actionId,
-                method: method,
-                metadata: ["text": text, "inputMethod": "qqmusic-pid-paste-entry-point"]
+                metadata: ["text": text, "inputMethod": "verified-hid-paste"]
             )
         }
     }
@@ -1277,8 +1197,8 @@ private func performType(action: [String: Any], actionId: String, method: String
         actionId: actionId,
         method: method,
         code: "ACTION_FAILED",
-        message: "Unable to paste text into QQ Music search element.",
-        details: ["role": axString(element, kAXRoleAttribute) ?? "unknown"]
+        message: "Unable to type into resolved element through AX, app-targeted event, or verified global HID.",
+        details: ["role": role ?? "unknown"]
     )
 }
 
@@ -1311,8 +1231,6 @@ private func performKey(action: [String: Any], actionId: String, method: String,
     }
 
     if !keyChord.flags.isEmpty {
-        activateTargetApp(app)
-
         if postKeyChordToPid(app.processIdentifier, chord: keyChord) {
             return passedActionResult(
                 actionId: actionId,
@@ -1321,53 +1239,60 @@ private func performKey(action: [String: Any], actionId: String, method: String,
             )
         }
 
+        activateTargetApp(app)
+        if postKeyChordToHidWhenFrontmost(app.processIdentifier, chord: keyChord) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["key": key, "inputMethod": "verified-hid-key-chord"]
+            )
+        }
+
         return failedActionResult(
             actionId: actionId,
             method: method,
             code: "ACTION_FAILED",
-            message: "Unable to post key chord to target app.",
+            message: "Unable to post key chord through app-targeted event or verified global HID.",
             details: ["key": key]
         )
     }
 
     let keyCode = keyChord.keyCode
 
-    if isQQMusicTarget(target) {
-        activateTargetApp(app)
-
-        if let element = resolveActionElement(action, expectedPid: app.processIdentifier),
-           isQQMusicSearchElement(element)
-        {
-            _ = clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
-            usleep(200_000)
-        }
-
-        if postKeyToHidWhenFrontmost(app.processIdentifier, keyCode: keyCode) {
-            return passedActionResult(
-                actionId: actionId,
-                method: method,
-                metadata: ["key": key, "inputMethod": "qqmusic-verified-hid-key"]
-            )
-        }
+    if let element = resolveActionElement(action, expectedPid: app.processIdentifier) {
+        _ = clickElementCenterToPid(element, pid: app.processIdentifier)
+        usleep(200_000)
     }
 
-    guard
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
-    else {
-        return failedActionResult(
+    if postKeyToPid(app.processIdentifier, keyCode: keyCode) {
+        return passedActionResult(
             actionId: actionId,
             method: method,
-            code: "ACTION_FAILED",
-            message: "Could not create keyboard event for key '\(key)'."
+            metadata: ["key": key, "inputMethod": "pid-key"]
         )
     }
 
-    down.postToPid(app.processIdentifier)
-    up.postToPid(app.processIdentifier)
-    usleep(500_000)
+    activateTargetApp(app)
+    if let element = resolveActionElement(action, expectedPid: app.processIdentifier) {
+        _ = clickElementCenterToHidWhenFrontmost(element, pid: app.processIdentifier)
+        usleep(200_000)
+    }
 
-    return passedActionResult(actionId: actionId, method: method, metadata: ["key": key])
+    if postKeyToHidWhenFrontmost(app.processIdentifier, keyCode: keyCode) {
+        return passedActionResult(
+            actionId: actionId,
+            method: method,
+            metadata: ["key": key, "inputMethod": "verified-hid-key"]
+        )
+    }
+
+    return failedActionResult(
+        actionId: actionId,
+        method: method,
+        code: "ACTION_FAILED",
+        message: "Unable to post key through app-targeted event or verified global HID.",
+        details: ["key": key]
+    )
 }
 
 private func performScroll(
@@ -1697,43 +1622,6 @@ private func resolveActionElement(_ action: [String: Any], expectedPid: pid_t? =
     return current
 }
 
-private func isQQMusicTarget(_ target: [String: Any]) -> Bool {
-    return nonEmptyString(target["id"])?.lowercased() == "com.tencent.qqmusicmac"
-}
-
-private func isSublimeTextTarget(_ target: [String: Any]) -> Bool {
-    return nonEmptyString(target["id"])?.lowercased() == "com.sublimetext.4"
-}
-
-private func isQQMusicSearchElement(_ element: AXUIElement) -> Bool {
-    let role = axString(element, kAXRoleAttribute)
-    let name = firstNonEmpty([
-        axString(element, kAXTitleAttribute),
-        axString(element, kAXDescriptionAttribute),
-        axString(element, kAXValueAttribute),
-        axString(element, "AXIdentifier"),
-    ])
-
-    return role == "AXUnknown" && name == "搜索"
-}
-
-private func findQQMusicSearchElement(app: NSRunningApplication) -> AXUIElement? {
-    let root = AXUIElementCreateApplication(app.processIdentifier)
-    wakeChromiumAccessibility(root)
-
-    return findAXElement(root, maxDepth: maxAXDepth, maxCount: maxAXElements) { element in
-        guard isQQMusicSearchElement(element),
-              let frame = axFrame(element),
-              let width = frame["width"] as? CGFloat,
-              let height = frame["height"] as? CGFloat
-        else {
-            return false
-        }
-
-        return width > 0 && height > 0
-    }
-}
-
 private func findAXElement(
     _ element: AXUIElement,
     depth: Int = 0,
@@ -1788,24 +1676,6 @@ private func findAXElement(
     )
 }
 
-private func qqMusicSearchContains(_ element: AXUIElement, text: String) -> Bool {
-    let expected = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !expected.isEmpty else {
-        return true
-    }
-
-    let values = [
-        axString(element, kAXValueAttribute),
-        axString(element, kAXTitleAttribute),
-        axString(element, kAXDescriptionAttribute),
-        axString(element, "AXIdentifier"),
-    ]
-
-    return values.compactMap { nonEmptyString($0) }.contains { value in
-        value.contains(expected)
-    }
-}
-
 private func activateTargetApp(_ app: NSRunningApplication) {
     if let bundleURL = app.bundleURL {
         let configuration = NSWorkspace.OpenConfiguration()
@@ -1836,6 +1706,14 @@ private func clickElementCenterToPid(_ element: AXUIElement, pid: pid_t) -> Bool
     }
 
     return postMouseClickToPid(pid, point: CGPoint(x: x + width / 2, y: y + height / 2))
+}
+
+private func clickElementTextEntryPointToPid(_ element: AXUIElement, pid: pid_t) -> Bool {
+    guard let point = axElementTextEntryPoint(element) else {
+        return false
+    }
+
+    return postMouseClickToPid(pid, point: point)
 }
 
 private func clickElementCenterToHidWhenFrontmost(_ element: AXUIElement, pid: pid_t) -> Bool {
@@ -2243,6 +2121,46 @@ private func postKeyChordToPid(_ pid: pid_t, chord: KeyChord) -> Bool {
     return true
 }
 
+private func postKeyChordToHidWhenFrontmost(_ pid: pid_t, chord: KeyChord) -> Bool {
+    if chord.flags == CGEventFlags.maskCommand {
+        return postKeyboardShortcutToHidWhenFrontmost(pid, keyCode: chord.keyCode)
+    }
+
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        return false
+    }
+
+    guard
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: chord.keyCode, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: chord.keyCode, keyDown: false)
+    else {
+        return false
+    }
+
+    down.flags = chord.flags
+    up.flags = chord.flags
+    down.post(tap: .cghidEventTap)
+    up.post(tap: .cghidEventTap)
+    usleep(300_000)
+
+    return true
+}
+
+private func postKeyToPid(_ pid: pid_t, keyCode: CGKeyCode) -> Bool {
+    guard
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
+    else {
+        return false
+    }
+
+    down.postToPid(pid)
+    up.postToPid(pid)
+    usleep(300_000)
+
+    return true
+}
+
 private func postKeyToHidWhenFrontmost(_ pid: pid_t, keyCode: CGKeyCode) -> Bool {
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
         return false
@@ -2596,6 +2514,10 @@ private func passedActionResult(
         metadata[key] = value
     }
 
+    if let inputBackend = inputBackendMetadata(method: method, metadata: metadata) {
+        metadata["inputBackend"] = inputBackend
+    }
+
     return [
         "actionId": actionId,
         "ok": true,
@@ -2603,6 +2525,90 @@ private func passedActionResult(
         "adapter": "mac-helper",
         "metadata": metadata,
     ]
+}
+
+private func inputBackendMetadata(method: String, metadata: [String: Any]) -> [String: Any]? {
+    let actionMethods: Set<String> = [
+        "click",
+        "secondary-click",
+        "hover",
+        "drag",
+        "type",
+        "key",
+        "scroll",
+    ]
+    guard actionMethods.contains(method) else {
+        return nil
+    }
+
+    let inputMethod = metadata["inputMethod"] as? String
+    let backend = inputBackendName(method: method, inputMethod: inputMethod)
+    let result: [String: Any] = [
+        "backend": backend,
+        "method": inputMethod ?? defaultInputMethodName(method: method, backend: backend),
+        "pointerImpact": pointerImpactName(backend: backend),
+        "permissionUsed": permissionsForInputBackend(backend),
+    ]
+
+    return result
+}
+
+private func inputBackendName(method: String, inputMethod: String?) -> String {
+    let normalized = inputMethod?.lowercased() ?? ""
+
+    if normalized.contains("hid") {
+        return "global-hid"
+    }
+
+    if normalized.contains("pid") ||
+        normalized.contains("paste") ||
+        normalized.contains("scroll-wheel") ||
+        normalized.contains("key-chord")
+    {
+        return "app-targeted-event"
+    }
+
+    if normalized.contains("ax") {
+        return "ax-semantic"
+    }
+
+    if method == "click" || method == "type" {
+        return "ax-semantic"
+    }
+
+    if method == "secondary-click" || method == "hover" || method == "drag" {
+        return "global-hid"
+    }
+
+    return "app-targeted-event"
+}
+
+private func defaultInputMethodName(method: String, backend: String) -> String {
+    if backend == "ax-semantic" {
+        return method == "type" ? "AXSetValue" : "AXPress"
+    }
+
+    if backend == "global-hid" {
+        return "CGEvent.cghidEventTap"
+    }
+
+    return "CGEvent.postToPid.\(method)"
+}
+
+private func pointerImpactName(backend: String) -> String {
+    if backend == "ax-semantic" {
+        return "none"
+    }
+
+    return backend == "global-hid" ? "global" : "target-app"
+}
+
+private func permissionsForInputBackend(_ backend: String) -> [String] {
+    if backend == "global-hid" {
+        return ["accessibility", "input-monitoring"]
+    }
+
+    return ["accessibility"]
 }
 
 private func nonEmptyString(_ value: Any?) -> String? {

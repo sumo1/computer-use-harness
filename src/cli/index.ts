@@ -258,8 +258,14 @@ function normalizeActionKind(command: string | undefined): ActionKind | undefine
 
 function createCliTarget(args: ParsedArgs): Target | undefined {
   const app = readFlagValue(args, "app")
-  const id = readFlagValue(args, "id") ?? readFlagValue(args, "target-id") ?? app
-  const name = readFlagValue(args, "name") ?? readFlagValue(args, "target-name") ?? app
+  const capability = app ? findAppCapability(app) : undefined
+  const id =
+    readFlagValue(args, "id") ?? readFlagValue(args, "target-id") ?? capability?.appId ?? app
+  const name =
+    readFlagValue(args, "name") ??
+    readFlagValue(args, "target-name") ??
+    capability?.displayName ??
+    app
 
   if (!id && !name) {
     return undefined

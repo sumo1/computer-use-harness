@@ -81,12 +81,12 @@ Use both sources of evidence:
 Accessibility context:
 ${accessibilityContext}
 
-Follow the task constraints exactly. If the task asks for albums, look for album names, release dates, and artist information. Ignore unrelated entries, controls, playback text, playlists, and decorative content. If multiple matching entries are present, compare release dates and choose the newest one.
+Follow the task constraints exactly. Extract only the fields requested by the task. Ignore unrelated controls, navigation labels, decorative content, and stale background text. If the task asks for a ranked answer such as newest, largest, highest, or most popular, compare all visible matching candidates and include the comparison basis in the JSON.
 
 Return ONLY valid JSON (no markdown), for example:
-{"albumName": "太阳之子", "releaseDate": "2026-03-25", "artist": "周杰伦"}
+{"name": "example item", "basis": "matched visible field and compared requested ranking value"}
 
-If the required fields are not present in either the screenshot or accessibility context, return: {"status": "no_album_info_found", "reason": "describe the missing fields and visible candidates"}`
+If the required fields are not present in either the screenshot or accessibility context, return: {"status": "insufficient_evidence", "reason": "describe the missing fields and visible candidates"}`
 
     const response = await withTimeout(
       this.anthropic.messages.create({
@@ -143,12 +143,12 @@ ${accessibilityContext}
 
 Task: ${query}
 
-Use link labels, headings, static text, row/cell labels, and date-like values from the context. Follow the task constraints exactly. Ignore unrelated controls and decorative content. If multiple matching entries are present, compare release dates and choose the newest one.
+Use link labels, headings, static text, row/cell labels, and structured values from the context. Follow the task constraints exactly. Ignore unrelated controls and decorative content. If multiple matching entries are present, compare the field requested by the task, such as date, size, count, or popularity.
 
 Return ONLY valid JSON (no markdown), for example:
-{"albumName": "太阳之子", "releaseDate": "2026-03-25", "artist": "周杰伦"}
+{"name": "example item", "basis": "matched visible field and compared requested ranking value"}
 
-If the required fields are not present, return: {"status": "no_album_info_found", "availableInfo": "describe the missing fields and visible candidates"}`
+If the required fields are not present, return: {"status": "insufficient_evidence", "availableInfo": "describe the missing fields and visible candidates"}`
 
     const response = await withTimeout(
       this.anthropic.messages.create({

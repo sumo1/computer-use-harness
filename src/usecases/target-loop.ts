@@ -7,6 +7,7 @@ import {
   createTargetModeState,
   decideTargetMode,
   targetModeInitialSteps as heuristicInitialSteps,
+  rankingToJson,
   recordTargetModeProgress,
 } from "./target-mode.js"
 import type { UseCaseGoal } from "./types.js"
@@ -378,9 +379,9 @@ function candidateSummary(candidate: EntityCandidate): JsonObject {
     confidence: candidate.confidence,
     missingFields: candidate.missingFields,
     fields: candidate.fields,
-    ...(candidate.title ? { title: candidate.title } : {}),
-    ...(candidate.artist ? { artist: candidate.artist } : {}),
-    ...(candidate.releaseDate ? { releaseDate: candidate.releaseDate } : {}),
+    evidenceText: candidate.evidenceText,
+    ...(candidate.label ? { label: candidate.label } : {}),
+    ...(candidate.ranking ? { ranking: rankingToJson(candidate.ranking) } : {}),
   }
 }
 

@@ -306,6 +306,44 @@
     - album tab loaded
     - latest G.E.M. album name artist and release date extracted successfully
 
+- id: UC-120
+  title: Find largest file in Downloads
+  target:
+    kind: app
+    id: com.apple.finder
+    name: Finder
+    platform: macos
+  requires:
+    platform: macos
+    permissions:
+      - accessibility
+  goal:
+    mode: target
+    entity: file
+    query: Downloads
+    coverage:
+      strategy: scroll-until-stable
+      maxScans: 2
+      stableObservations: 1
+      minObservations: 2
+    orderBy:
+      field: fileSize
+      direction: desc
+    requiredFields:
+      - fileName
+      - fileSize
+    confirmation: list
+    maxIterations: 8
+  steps:
+    - open app
+    - read app state
+    - extract largest file from visible Downloads file list; compare file sizes and return fileName fileSize
+  success:
+    - Finder is the target app
+    - Downloads file list is observed
+    - list coverage is proven by scrolling until stable
+    - largest file name and file size are extracted successfully
+
 - id: UC-110
   title: Edit and save a file in Sublime Text
   target:
