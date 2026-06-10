@@ -56,6 +56,7 @@ Claude Code / Codex / shell / future MCP
 - 机器可读 JSON 输出。
 - 稳定 command error code 和 exit code。
 - Use case harness。
+- 自由 native action runner（observe / open / click / type / key / scroll / drag / hover / extract）。
 - fake runner。
 - JSONL trace runtime。
 - policy guard。
@@ -75,7 +76,13 @@ Claude Code / Codex / shell / future MCP
 - `click` - 点击 AX 元素或屏幕坐标
 - `type` - 输入文本（标准 AX 输入或 paste fallback）
 - `key` - 按键和快捷键
-- `scroll` - 滚动（协议就绪，实现待补充）
+- `scroll` - 滚动并重新观察
+- `drag` / `hover` / `secondary-click` - 基础鼠标操作
+
+两条入口并存：
+
+- `computer-use usecases run ...`：跑 `usecases/cases.yaml` 里的预定义回归用例。
+- `computer-use observe/click/type/key/scroll/...`：给 agent 或 shell loop 做一步一决策的通用原子操作，不需要先写 case。
 
 **真实 usecase 已验证**：
 
@@ -177,14 +184,27 @@ npm run build
 ./dist/cli/index.js trace --last
 ```
 
-### 4. 构建 Swift helper
+### 4. 跑自由原子 action
+
+```sh
+./dist/cli/index.js observe --app "Fake Target App" --fake --pretty
+./dist/cli/index.js click --app "Fake Target App" --fake \
+  --keyword Primary \
+  --description "click button named Primary" \
+  --pretty
+./dist/cli/index.js scroll --app "Fake Target App" --fake down 2 --pretty
+```
+
+每个 action 都会执行 policy、必要的 observe-before、action、observe-after，并写入 trace。
+
+### 5. 构建 Swift helper
 
 ```sh
 cd native/mac-helper
 swift build
 ```
 
-### 5. 跑真实 usecase
+### 6. 跑真实 usecase
 
 ```sh
 # QQ Music: 搜索"鸭子"并播放
@@ -214,6 +234,12 @@ swift build
 computer-use version
 computer-use apps
 computer-use capabilities --app Safari
+computer-use observe --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use type --app "Fake Target App" --fake --keyword "Main Input" --text hello
+computer-use key --app Finder --key Enter --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use scroll --app Finder --direction down --amount 2 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use extract --app Finder --query "visible files" --fields files --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use usecases list
 computer-use usecases dry-run UC-030
 computer-use usecases run UC-030 --fake

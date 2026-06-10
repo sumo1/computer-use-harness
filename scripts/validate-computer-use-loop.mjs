@@ -184,6 +184,82 @@ assert.equal(cliResult.data.status, "passed")
 assert(cliResult.data.steps.at(-1)?.description.includes("extract target goal result"))
 assertTargetLoopMetadata(cliResult.data.trace)
 
+const actionObserveRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "action",
+    "observe",
+    "--app",
+    "com.fake.MediaApp",
+    "--name",
+    "Fake Media App",
+    "--mac-helper",
+    helperPath,
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(actionObserveRun.status, 0, actionObserveRun.stderr || actionObserveRun.stdout)
+
+const actionObserveResult = JSON.parse(actionObserveRun.stdout)
+assert.equal(actionObserveResult.ok, true)
+assert.equal(actionObserveResult.data.mode, "native-action")
+assert.equal(actionObserveResult.data.status, "passed")
+assert.equal(actionObserveResult.data.observation.elements.length > 0, true)
+assert.equal(
+  actionObserveResult.data.trace.some(
+    (event) => event.kind === "action" && event.action?.kind === "observe",
+  ),
+  true,
+)
+
+const actionClickRun = spawnSync(
+  process.execPath,
+  [
+    "dist/cli/index.js",
+    "click",
+    "--app",
+    "Fake Target App",
+    "--fake",
+    "--keyword",
+    "Primary",
+    "--description",
+    "click button named Primary",
+    "--pretty",
+  ],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+    },
+  },
+)
+
+assert.equal(actionClickRun.status, 0, actionClickRun.stderr || actionClickRun.stdout)
+
+const actionClickResult = JSON.parse(actionClickRun.stdout)
+assert.equal(actionClickResult.ok, true)
+assert.equal(actionClickResult.data.mode, "native-action")
+assert.equal(actionClickResult.data.status, "passed")
+assert.equal(actionClickResult.data.action.kind, "click")
+assert.equal(actionClickResult.data.action.element.name, "Primary")
+assert(
+  actionClickResult.data.trace.some(
+    (event) => event.kind === "observation" && event.action?.id.endsWith(":observe-before"),
+  ),
+)
+
 const extractResult = cliResult.data.trace
   .filter((event) => event.kind === "result")
   .map((event) => event.result)

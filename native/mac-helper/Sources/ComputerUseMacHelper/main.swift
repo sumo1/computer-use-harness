@@ -372,6 +372,19 @@ private func handleAction(id: Any?, method: String, paramsValue: Any?) -> [Strin
     )
 }
 
+// wakeChromiumAccessibility opts a Chromium-based app (Chrome, Electron, etc.)
+// into exposing its renderer accessibility tree. Chromium keeps the per-renderer
+// AX tree dormant until an assistive client sets one of these attributes on the
+// app element; without it AXUIElementCreateApplication(pid) yields an app with
+// windows but no descendant elements (the empty-AXWebArea symptom). Setting
+// AXManualAccessibility (Chromium's documented opt-in) — with AXEnhancedUserInterface
+// as a fallback for other toolkits — makes the DOM-derived tree materialize.
+// Safe to call on any app: non-Chromium apps ignore the unknown attribute.
+private func wakeChromiumAccessibility(_ root: AXUIElement) {
+    AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+}
+
 private func collectAXElements(target: [String: Any]) -> [[String: Any]] {
     guard AXIsProcessTrusted() else {
         return []
@@ -382,6 +395,7 @@ private func collectAXElements(target: [String: Any]) -> [[String: Any]] {
     }
 
     let root = AXUIElementCreateApplication(app.processIdentifier)
+    wakeChromiumAccessibility(root)
     var elements: [[String: Any]] = []
     collectAXElement(
         root,
@@ -1378,6 +1392,7 @@ private func performScroll(
 
     if scrollElement == nil {
         let root = AXUIElementCreateApplication(app.processIdentifier)
+        wakeChromiumAccessibility(root)
         var focusedRef: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focusedRef)
         if error == .success, let focused = focusedRef {
@@ -1668,6 +1683,7 @@ private func resolveActionElement(_ action: [String: Any], expectedPid: pid_t? =
     }
 
     let root = AXUIElementCreateApplication(ref.pid)
+    wakeChromiumAccessibility(root)
     var current = root
 
     for index in ref.path {
@@ -1703,6 +1719,7 @@ private func isQQMusicSearchElement(_ element: AXUIElement) -> Bool {
 
 private func findQQMusicSearchElement(app: NSRunningApplication) -> AXUIElement? {
     let root = AXUIElementCreateApplication(app.processIdentifier)
+    wakeChromiumAccessibility(root)
 
     return findAXElement(root, maxDepth: maxAXDepth, maxCount: maxAXElements) { element in
         guard isQQMusicSearchElement(element),

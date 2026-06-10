@@ -211,6 +211,9 @@ function fakeElements(target: Target): ElementRef[] {
       target,
       role: "button",
       name: "Primary",
+      metadata: {
+        frame: { x: 100, y: 100, width: 120, height: 40 },
+      },
     },
     {
       id: `${target.id ?? "target"}:input:main`,
@@ -218,6 +221,9 @@ function fakeElements(target: Target): ElementRef[] {
       target,
       role: "textbox",
       name: "Main Input",
+      metadata: {
+        frame: { x: 100, y: 160, width: 300, height: 32 },
+      },
     },
   ]
 }

@@ -15,6 +15,8 @@
     "check": "biome check .",
     "format": "biome check --write .",
     "validate:computer-use-loop": "node scripts/validate-computer-use-loop.mjs",
+    "validate:e2e": "npm run build && npm run validate:native-actions && npm run validate:computer-use-loop",
+    "validate:native-actions": "node scripts/validate-native-actions.mjs",
     "validate:target-mode:e2e": "npm run build && npm run validate:computer-use-loop",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/cli/index.js"
