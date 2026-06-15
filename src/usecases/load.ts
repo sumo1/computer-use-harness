@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { dirname, isAbsolute, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import YAML from "yaml"
 import type { TargetKind } from "../core/contracts.js"
 import type { UseCase, UseCaseDryRunItem, UseCaseGoal, UseCaseListItem } from "./types.js"
@@ -7,7 +9,7 @@ import type { UseCase, UseCaseDryRunItem, UseCaseGoal, UseCaseListItem } from ".
 const DEFAULT_USECASE_PATH = "usecases/cases.yaml"
 
 export async function loadUseCases(path = DEFAULT_USECASE_PATH): Promise<UseCase[]> {
-  const content = await readFile(resolve(process.cwd(), path), "utf8")
+  const content = await readFile(resolveUseCasePath(path), "utf8")
   const parsed = YAML.parse(content)
 
   if (!Array.isArray(parsed)) {
@@ -15,6 +17,19 @@ export async function loadUseCases(path = DEFAULT_USECASE_PATH): Promise<UseCase
   }
 
   return parsed.map(validateUseCase)
+}
+
+function resolveUseCasePath(path: string): string {
+  if (isAbsolute(path)) {
+    return path
+  }
+
+  const cwdPath = resolve(process.cwd(), path)
+  if (existsSync(cwdPath)) {
+    return cwdPath
+  }
+
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../..", path)
 }
 
 export function toListItem(useCase: UseCase): UseCaseListItem {

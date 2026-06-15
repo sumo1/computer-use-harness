@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { runNativeAction } from "../dist/actions/native-action-runner.js"
 
 const repoRoot = new URL("..", import.meta.url)
+const cliPath = fileURLToPath(new URL("../dist/cli/index.js", import.meta.url))
 
 const target = {
   kind: "app",
@@ -18,7 +22,43 @@ assert.equal(observe.data.mode, "native-action")
 assert.equal(observe.data.status, "passed")
 assert.equal(observe.data.action.kind, "observe")
 assert.equal(observe.data.observation.elements.length, 2)
+assert.equal(observe.data.observationSummary.elementCount, 2)
+assert(observe.data.observationSummary.visibleText.includes("Primary"))
 assert.equal(existsSync(observe.data.tracePath), true)
+
+const observeText = runCli(["observe", "--app", "Fake Target App", "--fake", "--text", "--pretty"])
+assert(observeText.data.visibleText.includes("Primary"))
+assert(observeText.data.visibleText.includes("Main Input"))
+
+const text = runCli(["text", "--app", "Fake Target App", "--fake", "--pretty"])
+assert(text.data.visibleText.includes("Primary"))
+assert.equal(text.data.summary.inputs[0].name, "Main Input")
+
+const runningApps = runCli(["apps", "--running", "--fake", "--pretty"])
+assert.equal(runningApps.data.source, "fake")
+assert.equal(runningApps.data.apps[0].name, "Fake Target App")
+
+const resolvedApp = runCli(["resolve-app", "--app", "Fake Target App", "--fake", "--pretty"])
+assert.equal(resolvedApp.data.runningApps[0].appId, "com.fake.TargetApp")
+assert.equal(resolvedApp.data.windows[0].focused, true)
+
+const screenshotPath = join(mkdtempSync(join(tmpdir(), "computer-use-screenshot-")), "shot.png")
+const screenshot = runCli([
+  "screenshot",
+  "--app",
+  "Fake Target App",
+  "--fake",
+  "--out",
+  screenshotPath,
+  "--pretty",
+])
+assert.equal(screenshot.data.screenshot.path, screenshotPath)
+assert.equal(screenshot.data.screenshot.width, 1920)
+assert.equal(existsSync(screenshotPath), true)
+
+const doctor = runCli(["doctor", "--app", "Fake Target App", "--fake", "--pretty"])
+assert.equal(doctor.data.status, "passed")
+assert(doctor.data.checks.some((check) => check.name === "running-apps"))
 
 const finderAlias = runCli(["observe", "--app", "Finder", "--fake", "--pretty"])
 assert.equal(finderAlias.data.target.id, "com.apple.finder")
@@ -91,6 +131,51 @@ const invalidResult = JSON.parse(invalid.stdout)
 assert.equal(invalidResult.ok, false)
 assert.equal(invalidResult.error.code, "INVALID_ACTION_KIND")
 
+const failOnActionFailed = spawnCli([
+  "click",
+  "--app",
+  "Terminal",
+  "--fake",
+  "--keyword",
+  "Primary",
+  "--fail-on-action-failed",
+  "--pretty",
+])
+assert.equal(failOnActionFailed.status, 2)
+const failOnActionFailedResult = JSON.parse(failOnActionFailed.stdout)
+assert.equal(failOnActionFailedResult.ok, true)
+assert.equal(failOnActionFailedResult.data.status, "blocked")
+assert.equal(failOnActionFailedResult.data.actionFailure.actionKind, "click")
+
+const casesDir = mkdtempSync(join(tmpdir(), "computer-use-cases-"))
+const casesPath = join(casesDir, "cases.yaml")
+writeFileSync(
+  casesPath,
+  `- id: UC-TMP
+  title: Temporary case
+  requires:
+    platform: macos
+  steps:
+    - read app state
+  success:
+    - temporary case loads
+`,
+  "utf8",
+)
+const casesList = runCli(["usecases", "list", "--cases", casesPath, "--pretty"])
+assert.equal(casesList.data.casesPath, casesPath)
+assert.equal(casesList.data.cases[0].id, "UC-TMP")
+
+const defaultCasesFromOtherCwd = spawnCliFromCwd(["usecases", "list", "--pretty"], casesDir)
+assert.equal(
+  defaultCasesFromOtherCwd.status,
+  0,
+  defaultCasesFromOtherCwd.stderr || defaultCasesFromOtherCwd.stdout,
+)
+const defaultCasesFromOtherCwdResult = JSON.parse(defaultCasesFromOtherCwd.stdout)
+assert.equal(defaultCasesFromOtherCwdResult.ok, true)
+assert(defaultCasesFromOtherCwdResult.data.cases.some((entry) => entry.id === "UC-001"))
+
 const axOnlyWithoutScreenRecording = await runNativeAction({
   target,
   helper: axOnlyHelperWithMissingScreenRecording(),
@@ -121,8 +206,12 @@ function runCli(args) {
 }
 
 function spawnCli(args) {
-  return spawnSync(process.execPath, ["dist/cli/index.js", ...args], {
-    cwd: repoRoot,
+  return spawnCliFromCwd(args, repoRoot)
+}
+
+function spawnCliFromCwd(args, cwd) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    cwd,
     encoding: "utf8",
     env: {
       ...process.env,

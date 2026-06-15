@@ -1,10 +1,23 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto"
+import { mkdir, writeFile } from "node:fs/promises"
+import { dirname, resolve } from "node:path"
 import { runNativeAction } from "../actions/native-action-runner.js"
-import type { Action, ActionKind, JsonObject, Target } from "../core/contracts.js"
+import { createFakeMacHelperClient } from "../adapters/mac/fake-helper-client.js"
+import type { MacHelperClient, MacRunningApp } from "../adapters/mac/helper-protocol.js"
+import { MacHelperProcessClient } from "../adapters/mac/stdio-helper-client.js"
+import type {
+  Action,
+  ActionKind,
+  ElementRef,
+  JsonObject,
+  JsonValue,
+  Observation,
+  Target,
+} from "../core/contracts.js"
 import { CommandErrorCode, ExitCode } from "../core/errors.js"
-import { fail, ok } from "../core/result.js"
+import { type CommandResult, fail, ok } from "../core/result.js"
 import { findAppCapability, listAppCapabilities } from "../runtime/app-registry.js"
 import { readLastTrace, writeTrace } from "../runtime/trace.js"
 import { runFakeUseCase } from "../usecases/fake-runner.js"
@@ -20,6 +33,7 @@ interface ParsedArgs {
 const VALUE_FLAGS = new Set([
   "amount",
   "app",
+  "cases",
   "description",
   "direction",
   "fields",
@@ -29,6 +43,7 @@ const VALUE_FLAGS = new Set([
   "mac-helper",
   "name",
   "observation-mode",
+  "out",
   "platform",
   "poll-interval-ms",
   "query",
@@ -83,6 +98,26 @@ async function main(argv: string[]): Promise<number> {
       return ExitCode.OK
     }
 
+    if (args.command[0] === "doctor") {
+      return await handleDoctor(args, pretty)
+    }
+
+    if (args.command[0] === "screenshot") {
+      return await handleScreenshot(args, pretty)
+    }
+
+    if (args.command[0] === "text") {
+      return await handleText(args, pretty)
+    }
+
+    if (args.command[0] === "resolve-app") {
+      return await handleResolveApp(args, pretty)
+    }
+
+    if (args.command[0] === "apps") {
+      return await handleApps(args, pretty)
+    }
+
     if (args.command[0] === "action" || isTopLevelActionCommand(args.command[0])) {
       return await handleActionCommand(args, pretty)
     }
@@ -93,11 +128,6 @@ async function main(argv: string[]): Promise<number> {
 
     if (args.command[0] === "trace") {
       return await handleTrace(args, pretty)
-    }
-
-    if (args.command[0] === "apps") {
-      writeResult(ok("apps.list", { apps: listAppCapabilities() }), pretty)
-      return ExitCode.OK
     }
 
     if (args.command[0] === "capabilities") {
@@ -209,9 +239,242 @@ async function handleActionCommand(args: ParsedArgs, pretty: boolean): Promise<n
     fake: normalizedArgs.flags.has("fake"),
   })
   const traceWrite = await writeTrace(runResult.traceId, runResult.trace)
+  const output = decorateActionOutput(runResult, normalizedArgs)
 
-  writeResult(ok("action.run", { ...runResult, tracePath: traceWrite.tracePath }), pretty)
+  writeResult(ok("action.run", { ...output, tracePath: traceWrite.tracePath }), pretty)
+  return normalizedArgs.flags.has("fail-on-action-failed") && runResult.status !== "passed"
+    ? ExitCode.USAGE_OR_BUSINESS_ERROR
+    : ExitCode.OK
+}
+
+async function handleApps(args: ParsedArgs, pretty: boolean): Promise<number> {
+  if (!args.flags.has("running")) {
+    writeResult(ok("apps.list", { apps: listAppCapabilities(), source: "registry" }), pretty)
+    return ExitCode.OK
+  }
+
+  const helperResult = createCliHelper(args)
+  if (!helperResult.ok) {
+    writeResult(helperResult.error, pretty)
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  try {
+    const apps = await helperResult.helper.listApps()
+    const query = readFlagValue(args, "app")
+    const filtered = query ? apps.filter((app) => matchesRunningApp(app, query)) : apps
+    writeResult(
+      ok("apps.running", {
+        apps: filtered,
+        source: helperResult.source,
+        ...(query ? { query } : {}),
+      }),
+      pretty,
+    )
+    return ExitCode.OK
+  } finally {
+    helperResult.close?.()
+  }
+}
+
+async function handleResolveApp(args: ParsedArgs, pretty: boolean): Promise<number> {
+  const appName = readFlagValue(args, "app")
+  if (!appName) {
+    writeResult(
+      fail("resolve-app", CommandErrorCode.MISSING_APP_NAME, "App name is required.", {
+        usage: "computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>)",
+      }),
+      pretty,
+    )
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  const helperResult = createCliHelper(args)
+  if (!helperResult.ok) {
+    writeResult(helperResult.error, pretty)
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  try {
+    const capability = findAppCapability(appName)
+    const target = createCliTarget(args)
+    const runningApps = (await helperResult.helper.listApps()).filter((app) =>
+      matchesRunningApp(app, appName),
+    )
+    const windows = target ? await helperResult.helper.listWindows(target) : []
+
+    writeResult(
+      ok("app.resolve", {
+        query: appName,
+        target,
+        capability,
+        runningApps,
+        windows,
+        source: helperResult.source,
+      }),
+      pretty,
+    )
+    return ExitCode.OK
+  } finally {
+    helperResult.close?.()
+  }
+}
+
+async function handleScreenshot(args: ParsedArgs, pretty: boolean): Promise<number> {
+  const target = createCliTarget(args)
+  if (!target) {
+    writeResult(
+      fail("screenshot", CommandErrorCode.MISSING_APP_NAME, "App target requires --app."),
+      pretty,
+    )
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  const helperResult = createCliHelper(args)
+  if (!helperResult.ok) {
+    writeResult(helperResult.error, pretty)
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  try {
+    const screenshot = await helperResult.helper.screenshot(target)
+    const outPath = readFlagValue(args, "out")
+    let outputPath: string | undefined
+    if (outPath) {
+      outputPath = resolve(process.cwd(), outPath)
+      await mkdir(dirname(outputPath), { recursive: true })
+      await writeFile(outputPath, Buffer.from(screenshot.data, "base64"))
+    }
+
+    writeResult(
+      ok("screenshot.capture", {
+        target,
+        screenshot: {
+          format: screenshot.format,
+          width: screenshot.width,
+          height: screenshot.height,
+          ...(screenshot.timestamp ? { timestamp: screenshot.timestamp } : {}),
+          ...(outputPath ? { path: outputPath } : {}),
+          ...(!outputPath || args.flags.has("include-data") ? { data: screenshot.data } : {}),
+        },
+        source: helperResult.source,
+      }),
+      pretty,
+    )
+    return ExitCode.OK
+  } finally {
+    helperResult.close?.()
+  }
+}
+
+async function handleText(args: ParsedArgs, pretty: boolean): Promise<number> {
+  const observationResult = await observeForCli(args, "text")
+  if (!observationResult.ok) {
+    writeResult(observationResult.error, pretty)
+    return ExitCode.USAGE_OR_BUSINESS_ERROR
+  }
+
+  writeResult(
+    ok("text.visible", {
+      target: observationResult.target,
+      visibleText: visibleTextFromObservation(observationResult.observation),
+      summary: observationSummary(observationResult.observation),
+      source: observationResult.source,
+    }),
+    pretty,
+  )
   return ExitCode.OK
+}
+
+async function handleDoctor(args: ParsedArgs, pretty: boolean): Promise<number> {
+  const checks: JsonObject[] = [
+    {
+      name: "node",
+      status: "passed",
+      detail: process.version,
+    },
+    {
+      name: "cli",
+      status: "passed",
+      detail: "dist CLI is executable in the current process",
+    },
+  ]
+
+  const helperCommand = readFlagValue(args, "mac-helper")
+  if (!args.flags.has("fake") && !helperCommand) {
+    checks.push({
+      name: "helper",
+      status: "warning",
+      detail: "No --mac-helper provided; real macOS checks were skipped.",
+    })
+    writeResult(ok("doctor", { status: "warning", checks }), pretty)
+    return ExitCode.OK
+  }
+
+  const helperResult = createCliHelper(args)
+  if (!helperResult.ok) {
+    checks.push({
+      name: "helper",
+      status: "failed",
+      detail: helperResult.error.error?.message ?? "Helper setup failed.",
+    })
+    writeResult(ok("doctor", { status: "failed", checks }), pretty)
+    return ExitCode.OK
+  }
+
+  try {
+    const permissions = await helperResult.helper.permissionStatus()
+    checks.push({
+      name: "permissions",
+      status: Object.values(permissions).every((value) => value === "granted")
+        ? "passed"
+        : "warning",
+      detail: {
+        accessibility: permissions.accessibility,
+        screenRecording: permissions.screenRecording,
+        inputMonitoring: permissions.inputMonitoring,
+      },
+    })
+
+    const apps = await helperResult.helper.listApps()
+    checks.push({
+      name: "running-apps",
+      status: "passed",
+      detail: `${apps.length} running apps visible to helper`,
+    })
+
+    const target = createCliTarget(args)
+    if (target) {
+      const windows = await helperResult.helper.listWindows(target)
+      checks.push({
+        name: "target-windows",
+        status: windows.length > 0 ? "passed" : "warning",
+        detail: {
+          target: targetToJson(target),
+          windows: windows.map((window) => ({
+            id: window.id,
+            appId: window.appId,
+            title: window.title,
+            focused: window.focused,
+          })),
+        },
+      })
+    }
+
+    const failed = checks.some((check) => check.status === "failed")
+    const warning = checks.some((check) => check.status === "warning")
+    writeResult(
+      ok("doctor", {
+        status: failed ? "failed" : warning ? "warning" : "passed",
+        checks,
+        source: helperResult.source,
+      }),
+      pretty,
+    )
+    return ExitCode.OK
+  } finally {
+    helperResult.close?.()
+  }
 }
 
 function handleCapabilities(args: ParsedArgs, pretty: boolean): number {
@@ -242,6 +505,325 @@ function handleCapabilities(args: ParsedArgs, pretty: boolean): number {
 
   writeResult(ok("capabilities.get", { capability }), pretty)
   return ExitCode.OK
+}
+
+function decorateActionOutput(
+  runResult: Awaited<ReturnType<typeof runNativeAction>>,
+  args: ParsedArgs,
+): JsonObject {
+  const output = runResult as unknown as JsonObject
+  const observation = runResult.observation
+
+  if (observation && (args.flags.has("summary") || runResult.action.kind === "observe")) {
+    output.observationSummary = observationSummary(observation)
+  }
+
+  if (observation && args.flags.has("text")) {
+    output.visibleText = visibleTextFromObservation(observation)
+  }
+
+  if (runResult.status !== "passed") {
+    output.actionFailure = actionFailureSummary(runResult)
+  }
+
+  return output
+}
+
+async function observeForCli(
+  args: ParsedArgs,
+  command: string,
+): Promise<
+  | {
+      ok: true
+      target: Target
+      observation: Observation
+      source: "fake" | "mac-helper"
+    }
+  | { ok: false; error: CommandResult }
+> {
+  const target = createCliTarget(args)
+  if (!target) {
+    return {
+      ok: false,
+      error: fail(command, CommandErrorCode.MISSING_APP_NAME, "App target requires --app."),
+    }
+  }
+
+  const helperResult = createCliHelper(args)
+  if (!helperResult.ok) {
+    return { ok: false, error: helperResult.error }
+  }
+
+  try {
+    const state = await helperResult.helper.getAppState(target, {
+      mode: readObservationMode(args),
+      includeScreenshotPayload: args.flags.has("include-screenshot"),
+    })
+
+    return {
+      ok: true,
+      target,
+      observation: state.observation,
+      source: helperResult.source,
+    }
+  } finally {
+    helperResult.close?.()
+  }
+}
+
+function createCliHelper(args: ParsedArgs):
+  | {
+      ok: true
+      helper: MacHelperClient
+      source: "fake" | "mac-helper"
+      close?: () => void
+    }
+  | { ok: false; error: CommandResult } {
+  const helperCommand = readFlagValue(args, "mac-helper")
+  if (args.flags.has("fake") && helperCommand) {
+    return {
+      ok: false,
+      error: fail(
+        "helper.create",
+        CommandErrorCode.INVALID_RUN_MODE,
+        "Use either --fake or --mac-helper, not both.",
+      ),
+    }
+  }
+
+  if (args.flags.has("fake")) {
+    return {
+      ok: true,
+      helper: createFakeMacHelperClient(),
+      source: "fake",
+    }
+  }
+
+  if (!helperCommand) {
+    return {
+      ok: false,
+      error: fail(
+        "helper.create",
+        CommandErrorCode.REAL_RUNNER_NOT_IMPLEMENTED,
+        "Use --fake or --mac-helper <path>.",
+      ),
+    }
+  }
+
+  const helper = new MacHelperProcessClient({ command: helperCommand })
+  return {
+    ok: true,
+    helper,
+    source: "mac-helper",
+    close: () => helper.close(),
+  }
+}
+
+function visibleTextFromObservation(observation: Observation): string[] {
+  const seen = new Set<string>()
+  const values: string[] = []
+
+  for (const value of [
+    ...observation.elements.flatMap(elementTextValues),
+    ...(observation.accessibilityTree ?? []).flatMap(accessibilityTreeTextValues),
+  ]) {
+    const text = value.trim()
+    const key = normalizeText(text)
+    if (!text || seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    values.push(text)
+  }
+
+  return values
+}
+
+function observationSummary(observation: Observation): JsonObject {
+  const elements = observation.elements
+  const visibleText = visibleTextFromObservation(observation)
+  const focusedElement = elements.find((element) => element.id === observation.focusedElementId)
+
+  return {
+    observationId: observation.id,
+    target: targetToJson(observation.target),
+    source: observation.source,
+    elementCount: elements.length,
+    axElementCount: observation.axElements?.length ?? elements.length,
+    visualTextElementCount: observation.visualTextElements?.length ?? 0,
+    visibleText: visibleText.slice(0, 80),
+    focusedWindow: observation.focusedWindow ? windowToJson(observation.focusedWindow) : null,
+    focusedElement: focusedElement ? elementSummary(focusedElement) : null,
+    windows: (observation.windows ?? []).map((window) => ({
+      id: window.id,
+      title: window.title,
+      focused: window.focused,
+      ...(window.appId ? { appId: window.appId } : {}),
+    })),
+    inputs: elements.filter(isInputElement).slice(0, 20).map(elementSummary),
+    controls: elements.filter(isControlElement).slice(0, 40).map(elementSummary),
+    screenshot: observation.screenshot
+      ? {
+          format: observation.screenshot.format,
+          width: observation.screenshot.width,
+          height: observation.screenshot.height,
+          ...(observation.screenshot.timestamp
+            ? { timestamp: observation.screenshot.timestamp }
+            : {}),
+        }
+      : null,
+  }
+}
+
+function elementSummary(element: ElementRef): JsonObject {
+  const frame = isRecord(element.metadata?.frame) ? element.metadata.frame : undefined
+
+  return {
+    id: element.id,
+    ...(element.role ? { role: element.role } : {}),
+    ...(element.name ? { name: element.name } : {}),
+    ...(frame ? { frame: frame as JsonObject } : {}),
+  }
+}
+
+function targetToJson(target: Target): JsonObject {
+  return {
+    kind: target.kind,
+    ...(target.id ? { id: target.id } : {}),
+    ...(target.name ? { name: target.name } : {}),
+    ...(target.platform ? { platform: target.platform } : {}),
+  }
+}
+
+function windowToJson(window: NonNullable<Observation["focusedWindow"]>): JsonObject {
+  return {
+    id: window.id,
+    title: window.title,
+    focused: window.focused,
+    ...(window.appId ? { appId: window.appId } : {}),
+    ...(window.bounds ? { bounds: window.bounds as unknown as JsonObject } : {}),
+  }
+}
+
+function actionErrorToJson(error: {
+  code: string
+  message: string
+  details?: JsonObject
+}): JsonObject {
+  return {
+    code: error.code,
+    message: error.message,
+    ...(error.details ? { details: error.details } : {}),
+  }
+}
+
+function elementTextValues(element: ElementRef): string[] {
+  const metadata = element.metadata ?? {}
+
+  return [
+    element.name,
+    stringValue(metadata.value),
+    stringValue(metadata.title),
+    stringValue(metadata.description),
+    stringValue(metadata.placeholder),
+  ].filter((value): value is string => typeof value === "string" && value.trim() !== "")
+}
+
+function accessibilityTreeTextValues(node: {
+  name?: string
+  value?: string
+  description?: string
+  children?: unknown[]
+}): string[] {
+  const children = (node.children ?? []).filter(isAccessibilityTextNode)
+
+  return [
+    node.name,
+    node.value,
+    node.description,
+    ...children.flatMap(accessibilityTreeTextValues),
+  ].filter((value): value is string => typeof value === "string" && value.trim() !== "")
+}
+
+function isAccessibilityTextNode(value: unknown): value is {
+  name?: string
+  value?: string
+  description?: string
+  children?: unknown[]
+} {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function actionFailureSummary(runResult: Awaited<ReturnType<typeof runNativeAction>>): JsonObject {
+  return {
+    status: runResult.status,
+    actionKind: runResult.action.kind,
+    description: stringValue(runResult.action.input?.description) ?? "",
+    error: runResult.result.error ? actionErrorToJson(runResult.result.error) : null,
+    capabilityFailure: stringValue(runResult.action.input?.capabilityFailure) ?? null,
+    helperMethod: stringValue(runResult.result.metadata?.helperMethod) ?? null,
+    inputBackend: isRecord(runResult.result.metadata?.inputBackend)
+      ? (runResult.result.metadata.inputBackend as JsonObject)
+      : null,
+  }
+}
+
+function isInputElement(element: ElementRef): boolean {
+  const role = normalizeText([element.role, element.metadata?.roleDescription].join(" "))
+  return (
+    role.includes("textfield") ||
+    role.includes("textbox") ||
+    role.includes("text field") ||
+    role.includes("input") ||
+    role.includes("combobox") ||
+    role.includes("输入")
+  )
+}
+
+function isControlElement(element: ElementRef): boolean {
+  const role = normalizeText([element.role, element.metadata?.roleDescription].join(" "))
+  return (
+    isInputElement(element) ||
+    role.includes("button") ||
+    role.includes("link") ||
+    role.includes("tab") ||
+    role.includes("menu") ||
+    role.includes("checkbox") ||
+    role.includes("radio") ||
+    role.includes("按钮") ||
+    role.includes("链接") ||
+    role.includes("标签")
+  )
+}
+
+function readObservationMode(args: ParsedArgs): "full" | "ax-only" | "visual-text" | undefined {
+  const mode = readFlagValue(args, "observation-mode")
+  if (mode === "full" || mode === "ax-only" || mode === "visual-text") {
+    return mode
+  }
+
+  return undefined
+}
+
+function matchesRunningApp(app: MacRunningApp, query: string): boolean {
+  const normalizedQuery = normalizeText(query)
+  return (
+    normalizeText(app.appId).includes(normalizedQuery) ||
+    normalizeText(app.name).includes(normalizedQuery)
+  )
+}
+
+function normalizeText(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : ""
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function isTopLevelActionCommand(command: string | undefined): boolean {
@@ -451,16 +1033,17 @@ function defaultActionDescription(
 
 async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number> {
   const subcommand = args.command[1]
+  const casesPath = readUseCasePath(args)
 
   if (subcommand === "list") {
-    const cases = await loadUseCases()
-    writeResult(ok("usecases.list", { cases: cases.map(toListItem) }), pretty)
+    const cases = await loadUseCases(casesPath)
+    writeResult(ok("usecases.list", { cases: cases.map(toListItem), casesPath }), pretty)
     return ExitCode.OK
   }
 
   if (subcommand === "dry-run") {
     const id = args.command[2]
-    const cases = await loadUseCases()
+    const cases = await loadUseCases(casesPath)
     const selectedCases = id ? cases.filter((entry) => entry.id === id) : cases
 
     if (id && selectedCases.length === 0) {
@@ -471,7 +1054,10 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
 
-    writeResult(ok("usecases.dry-run", { cases: selectedCases.map(toDryRunItem) }), pretty)
+    writeResult(
+      ok("usecases.dry-run", { cases: selectedCases.map(toDryRunItem), casesPath }),
+      pretty,
+    )
     return ExitCode.OK
   }
 
@@ -508,7 +1094,7 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
 
-    const cases = await loadUseCases()
+    const cases = await loadUseCases(casesPath)
     const useCase = cases.find((entry) => entry.id === id)
     if (!useCase) {
       writeResult(
@@ -523,7 +1109,10 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       : await runFakeUseCase(useCase)
     const traceWrite = await writeTrace(runResult.traceId, runResult.trace)
 
-    writeResult(ok("usecases.run", { ...runResult, tracePath: traceWrite.tracePath }), pretty)
+    writeResult(
+      ok("usecases.run", { ...runResult, tracePath: traceWrite.tracePath, casesPath }),
+      pretty,
+    )
     return ExitCode.OK
   }
 
@@ -534,12 +1123,16 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       `Unknown usecases command '${subcommand ?? ""}'.`,
       {
         usage:
-          "computer-use usecases list | computer-use usecases dry-run [id] | computer-use usecases run <id> (--fake | --mac-helper <path>)",
+          "computer-use usecases list [--cases <path>] | computer-use usecases dry-run [id] [--cases <path>] | computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>)",
       },
     ),
     pretty,
   )
   return ExitCode.USAGE_OR_BUSINESS_ERROR
+}
+
+function readUseCasePath(args: ParsedArgs): string | undefined {
+  return readFlagValue(args, "cases") ?? process.env.COMPUTER_USE_CASES ?? "usecases/cases.yaml"
 }
 
 async function handleTrace(args: ParsedArgs, pretty: boolean): Promise<number> {
@@ -722,13 +1315,17 @@ function queryFromDescription(description: string | undefined): string | undefin
 function usageText(): string {
   return [
     "computer-use version",
-    "computer-use apps [--pretty]",
+    "computer-use doctor [--app <name-or-bundle-id>] (--fake | --mac-helper <path>) [--pretty]",
+    "computer-use apps [--running (--fake | --mac-helper <path>)] [--pretty]",
+    "computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
     "computer-use capabilities --app <name> [--pretty]",
+    "computer-use screenshot --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--out <path>] [--pretty]",
+    "computer-use text --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
     "computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
     "computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
-    "computer-use usecases list [--pretty]",
-    "computer-use usecases dry-run [id] [--pretty]",
-    "computer-use usecases run <id> (--fake | --mac-helper <path>) [--pretty]",
+    "computer-use usecases list [--cases <path>] [--pretty]",
+    "computer-use usecases dry-run [id] [--cases <path>] [--pretty]",
+    "computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>) [--pretty]",
     "computer-use trace --last [--pretty]",
   ].join("\n")
 }

@@ -240,14 +240,19 @@ swift build
 ```sh
 computer-use version
 computer-use apps
+computer-use apps --running --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use doctor --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use resolve-app --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use capabilities --app Safari
-computer-use observe --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use observe --app Finder --summary --text --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use text --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use screenshot --app Finder --out /tmp/finder.png --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use type --app "Fake Target App" --fake --keyword "Main Input" --text hello
 computer-use key --app Finder --key Enter --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use scroll --app Finder --direction down --amount 2 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
 computer-use extract --app Finder --query "visible files" --fields files --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use usecases list
+computer-use usecases list --cases ./usecases/cases.yaml
 computer-use usecases dry-run UC-030
 computer-use usecases run UC-030 --fake
 computer-use usecases run UC-030 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
@@ -267,3 +272,6 @@ CLI 约束：
 - 日志和非协议噪声不能污染 stdout。
 - error code 必须稳定。
 - action failure 必须进入 trace。
+- agent shell 脚本必须同时检查 `ok` 和 `data.status`；需要让 shell 在动作失败时非 0，可加 `--fail-on-action-failed`。
+- `apps` 默认是 capability registry，不是运行中进程列表；运行中 app 用 `apps --running --mac-helper <helper>`。
+- 跨仓库调用 use case 时传 `--cases <path>`，避免依赖当前工作目录。

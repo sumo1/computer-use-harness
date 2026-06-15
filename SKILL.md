@@ -24,13 +24,17 @@ Use it when a task needs to look at or operate a native macOS application — re
 
 ```
 computer-use version
-computer-use apps [--pretty]
+computer-use doctor [--app <name-or-bundle-id>] (--fake | --mac-helper <path>) [--pretty]
+computer-use apps [--running (--fake | --mac-helper <path>)] [--pretty]
+computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
 computer-use capabilities --app <name> [--pretty]
+computer-use screenshot --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--out <path>] [--pretty]
+computer-use text --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
 computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
 computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
-computer-use usecases list [--pretty]
-computer-use usecases dry-run [id] [--pretty]
-computer-use usecases run <id> (--fake | --mac-helper <path>) [--pretty]
+computer-use usecases list [--cases <path>] [--pretty]
+computer-use usecases dry-run [id] [--cases <path>] [--pretty]
+computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>) [--pretty]
 computer-use trace --last [--pretty]
 ```
 
@@ -41,9 +45,16 @@ computer-use trace --last [--pretty]
 - Every atomic action still does policy preflight, AX-first observation when needed, post-action observation, verification metadata, stable JSON output, and JSONL trace writing.
 - Result trace events carry `actionTraceStep`: before/after observation evidence, `execution.inputBackend` (`ax-semantic` / `app-targeted-event` / `global-hid`), verification status, and virtual pointer overlay metadata when a screenshot is available.
 
-- `apps` — list registered apps + their support level and adapters.
+- `doctor` — preflight CLI/helper/permissions/running-app/target-window readiness.
+- `apps` — list registered app capabilities. It is not a running-process list.
+- `apps --running --mac-helper <helper>` — list running apps from the helper.
+- `resolve-app --app <target>` — resolve a user-facing app name against registry, running apps, and windows.
 - `capabilities --app <name>` — what the tool can do for one app.
 - `observe --app <target>` — read AX-first app state without mutating UI.
+- `observe --text --app <target>` — include a flat visible text list.
+- `observe --summary --app <target>` — include compact UI summary: visible text, inputs, controls, windows.
+- `text --app <target>` — return only visible text + summary from the current observation.
+- `screenshot --app <target> --out /tmp/shot.png` — capture app screenshot evidence.
 - `click --app <target> --keyword <name>` — bind a visible AX element by semantic name and click it.
 - `click --app <target> --x <n> --y <n>` — coordinate click, guarded by target-window verification in the helper.
 - `type --app <target> --text <text> [--keyword <input-name>]` — type text into the resolved/focused input.
@@ -66,7 +77,7 @@ computer-use trace --last [--pretty]
 
 Always check `ok` first. A business failure still returns valid JSON with `ok:false` and an `error.code` (e.g. `INVALID_RUN_MODE`, `UNKNOWN_USE_CASE`, `MISSING_APP_NAME`, `TRACE_NOT_FOUND`). Exit code: `0` ok, `2` usage/business error, `1` unexpected.
 
-An atomic action `data` carries: `mode: "native-action"`, `status`, `traceId`, `target`, `action`, `result`, optional final `observation`, full `trace[]`, and `tracePath`. Inspect the final result event's `actionTraceStep` before trusting an action as complete; it is the contract for observe -> action -> observe -> verify.
+An atomic action `data` carries: `mode: "native-action"`, `status`, `traceId`, `target`, `action`, `result`, optional final `observation`, full `trace[]`, and `tracePath`. Inspect both top-level `ok` and `data.status`; use `--fail-on-action-failed` when shell control flow should stop on `failed`/`blocked`. Inspect the final result event's `actionTraceStep` before trusting an action as complete; it is the contract for observe -> action -> observe -> verify.
 
 A `usecases run` `data` carries: `caseId`, `title`, `status` (`passed`/…), `mode` (`fake`/`native`), `traceId`, `steps[]` (each with `description`/`status`), `success[]` (the asserted success criteria), `trace[]` (full event log), and `tracePath`. Traces are JSONL at `.computer-use/traces/<traceId>.jsonl`; the latest path is in `.computer-use/traces/last`.
 
@@ -76,16 +87,19 @@ A `usecases run` `data` carries: `caseId`, `title`, `status` (`passed`/…), `mo
 # 1. Confirm it runs at all
 computer-use version
 
-# 2. Check macOS permissions before any real run (use case UC-001)
-computer-use usecases run UC-001 --mac-helper <helper> --pretty
+# 2. Check runtime readiness before any real run
+computer-use doctor --app Finder --mac-helper <helper> --pretty
 #   → AX-first commands need accessibility; visual modes also need screenRecording
 
 # 3. See what's available
 computer-use apps
+computer-use apps --running --mac-helper <helper> --pretty
+computer-use resolve-app --app Finder --mac-helper <helper> --pretty
 computer-use usecases list
 
 # 4. Drive one step at a time when an agent is making live decisions
-computer-use observe --app Finder --mac-helper <helper> --pretty
+computer-use observe --app Finder --summary --text --mac-helper <helper> --pretty
+computer-use screenshot --app Finder --out /tmp/finder.png --mac-helper <helper> --pretty
 computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --mac-helper <helper> --pretty
 computer-use scroll --app Finder --direction down --amount 2 --mac-helper <helper> --pretty
 
