@@ -121,6 +121,7 @@ function fakeWindows(target: Target): MacWindow[] {
       appId: target.id ?? "com.fake.TargetApp",
       title: target.name ?? "Fake Window",
       focused: true,
+      pid: target.pid ?? 1001,
     },
   ]
 }
@@ -173,6 +174,7 @@ function fakeObservationWindow(target: Target) {
     appId: target.id ?? "com.fake.TargetApp",
     title: target.name ?? "Fake Window",
     focused: true,
+    pid: target.pid ?? 1001,
     bounds: { x: 0, y: 0, width: 1920, height: 1080 },
   }
 }

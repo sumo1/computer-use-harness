@@ -182,6 +182,7 @@ private func listWindows(params: [String: Any]) -> [[String: Any]] {
             "appId": target["id"] as? String ?? "",
             "title": title,
             "focused": false,
+            "pid": Int(windowPid ?? 0),
         ]
     }
 }
@@ -1094,6 +1095,51 @@ private func performType(action: [String: Any], actionId: String, method: String
     }
 
     guard let element = resolveActionElement(action, expectedPid: app.processIdentifier) else {
+        if let point = actionPoint(action) {
+            if postMouseClickToPid(app.processIdentifier, point: point) {
+                usleep(200_000)
+
+                if pasteTextToPid(app.processIdentifier, text: text) {
+                    return passedActionResult(
+                        actionId: actionId,
+                        method: method,
+                        metadata: [
+                            "text": text,
+                            "inputMethod": "pid-point-paste",
+                            "x": point.x,
+                            "y": point.y,
+                        ]
+                    )
+                }
+            }
+
+            activateTargetApp(app)
+            if postMouseClickToHidWhenFrontmost(app.processIdentifier, point: point) {
+                usleep(200_000)
+
+                if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
+                    return passedActionResult(
+                        actionId: actionId,
+                        method: method,
+                        metadata: [
+                            "text": text,
+                            "inputMethod": "verified-hid-point-paste",
+                            "x": point.x,
+                            "y": point.y,
+                        ]
+                    )
+                }
+            }
+
+            return failedActionResult(
+                actionId: actionId,
+                method: method,
+                code: "ACTION_FAILED",
+                message: "Unable to focus or paste at explicit point.",
+                details: ["x": point.x, "y": point.y]
+            )
+        }
+
         if actionElementIsSynthetic(action), let point = actionElementFrameCenter(action) {
             if postMouseClickToPid(app.processIdentifier, point: point) {
                 usleep(200_000)
@@ -1139,11 +1185,30 @@ private func performType(action: [String: Any], actionId: String, method: String
             )
         }
 
+        if pasteTextToPid(app.processIdentifier, text: text) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "pid-focused-paste"]
+            )
+        }
+
+        activateTargetApp(app)
+        usleep(200_000)
+
+        if pasteTextToHidWhenFrontmost(app.processIdentifier, text: text) {
+            return passedActionResult(
+                actionId: actionId,
+                method: method,
+                metadata: ["text": text, "inputMethod": "verified-hid-focused-paste"]
+            )
+        }
+
         return failedActionResult(
             actionId: actionId,
             method: method,
             code: "ELEMENT_NOT_FOUND",
-            message: "type requires a resolvable action.element."
+            message: "type requires a resolvable action.element, explicit point, or focused input."
         )
     }
 
@@ -1544,9 +1609,15 @@ private func validateActionTarget(target: [String: Any], actionId: String, metho
 }
 
 private func findRunningApp(target: [String: Any]) -> NSRunningApplication? {
-    let targetId = nonEmptyString(target["id"])?.lowercased()
-    let targetName = nonEmptyString(target["name"])?.lowercased()
     let apps = NSWorkspace.shared.runningApplications
+
+    if let targetPid = targetPid(target) {
+        return apps.first { app in
+            app.processIdentifier == targetPid
+        }
+    }
+
+    let targetId = nonEmptyString(target["id"])?.lowercased()
 
     if let targetId,
        let app = apps.first(where: { $0.bundleIdentifier?.lowercased() == targetId })
@@ -1554,17 +1625,87 @@ private func findRunningApp(target: [String: Any]) -> NSRunningApplication? {
         return app
     }
 
-    if let targetName {
-        return apps.first { app in
-            guard let name = app.localizedName?.lowercased() else {
-                return false
-            }
+    if let windowTitle = nonEmptyString(target["windowTitle"]),
+       let ownerPid = windowOwnerPid(matchingTitle: windowTitle),
+       let app = apps.first(where: { $0.processIdentifier == ownerPid })
+    {
+        return app
+    }
 
-            return name == targetName || name.contains(targetName) || targetName.contains(name)
-        }
+    let targetName = nonEmptyString(target["name"])?.lowercased()
+    if let targetName {
+        return apps
+            .compactMap { app -> (score: Int, app: NSRunningApplication)? in
+                guard let name = app.localizedName?.lowercased(),
+                      let score = appNameMatchScore(name: name, targetName: targetName)
+                else {
+                    return nil
+                }
+
+                return (score, app)
+            }
+            .sorted { left, right in left.score > right.score }
+            .first?.app
     }
 
     return nil
+}
+
+private func targetPid(_ target: [String: Any]) -> pid_t? {
+    guard let number = target["pid"] as? NSNumber else {
+        return nil
+    }
+
+    return pid_t(number.int32Value)
+}
+
+private func appNameMatchScore(name: String, targetName: String) -> Int? {
+    if name == targetName {
+        return 100
+    }
+
+    if name.contains(targetName) {
+        return 80
+    }
+
+    if targetName.contains(name) {
+        return 20
+    }
+
+    return nil
+}
+
+private func windowOwnerPid(matchingTitle targetTitle: String) -> pid_t? {
+    let normalizedTargetTitle = targetTitle.lowercased()
+    var exactPid: pid_t?
+    var containsPid: pid_t?
+
+    guard
+        let rawWindows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]]
+    else {
+        return nil
+    }
+
+    for window in rawWindows {
+        guard let pid = window[kCGWindowOwnerPID as String] as? pid_t else {
+            continue
+        }
+
+        let title = ((window[kCGWindowName as String] as? String) ?? "").lowercased()
+        if title == normalizedTargetTitle {
+            exactPid = pid
+            break
+        }
+
+        if containsPid == nil && title.contains(normalizedTargetTitle) {
+            containsPid = pid
+        }
+    }
+
+    return exactPid ?? containsPid
 }
 
 private func appBundleURL(target: [String: Any]) -> URL? {
@@ -1585,13 +1726,19 @@ private func appBundleURL(target: [String: Any]) -> URL? {
         return nil
     }
 
-    return NSWorkspace.shared.runningApplications.first { app in
-        guard let name = app.localizedName?.lowercased() else {
-            return false
-        }
+    return NSWorkspace.shared.runningApplications
+        .compactMap { app -> (score: Int, bundleURL: URL)? in
+            guard let name = app.localizedName?.lowercased(),
+                  let bundleURL = app.bundleURL,
+                  let score = appNameMatchScore(name: name, targetName: targetName)
+            else {
+                return nil
+            }
 
-        return name == targetName || name.contains(targetName) || targetName.contains(name)
-    }?.bundleURL
+            return (score, bundleURL)
+        }
+        .sorted { left, right in left.score > right.score }
+        .first?.bundleURL
 }
 
 private func resolveActionElement(_ action: [String: Any], expectedPid: pid_t? = nil) -> AXUIElement? {
@@ -2390,12 +2537,40 @@ private func macKeyCode(_ key: String) -> CGKeyCode? {
         return 9
     case "n":
         return 45
+    case "0":
+        return 29
+    case "1":
+        return 18
+    case "2":
+        return 19
+    case "3":
+        return 20
+    case "4":
+        return 21
+    case "5":
+        return 23
+    case "6":
+        return 22
+    case "7":
+        return 26
+    case "8":
+        return 28
+    case "9":
+        return 25
+    case "space":
+        return 49
+    case "delete", "backspace":
+        return 51
     case "enter", "return":
         return 36
     case "escape", "esc":
         return 53
     case "tab":
         return 48
+    case "right", "arrowright", "arrow-right", "rightarrow", "right-arrow":
+        return 124
+    case "left", "arrowleft", "arrow-left", "leftarrow", "left-arrow":
+        return 123
     case "pagedown", "page-down", "page_down":
         return 121
     case "pageup", "page-up", "page_up":

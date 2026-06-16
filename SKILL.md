@@ -17,24 +17,25 @@ Use it when a task needs to look at or operate a native macOS application — re
 ## Prerequisites (verify before relying on it)
 
 - **macOS 14+ only.** On any other platform, stop and tell the user it's unsupported.
-- The `computer-use` command must be on PATH (or call `node <repo>/dist/cli/index.js`). If `computer-use version` fails, it isn't installed — see *Install*.
+- The `computer-use` command should be on PATH. If `computer-use version` fails, it isn't installed — see *Install*.
+- Real macOS runs auto-discover the helper in this order: `--mac-helper`, `COMPUTER_USE_MAC_HELPER`, `COMPUTER_USE_HARNESS_DIR`, then the repo default build path.
 - **macOS permissions** for real (non-fake) runs: AX-first actions require **Accessibility**. Screenshot/OCR/vision modes additionally require **Screen Recording**. Check with `policy-check`; if the action returns `PERMISSION_REQUIRED`, tell the user which permission to grant — you cannot grant it for them.
 
 ## Command surface
 
 ```
 computer-use version
-computer-use doctor [--app <name-or-bundle-id>] (--fake | --mac-helper <path>) [--pretty]
-computer-use apps [--running (--fake | --mac-helper <path>)] [--pretty]
-computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
+computer-use doctor [--app <name-or-bundle-id> | --pid <pid> | --window-title <title>] [--fake | --mac-helper <path>] [--pretty]
+computer-use apps [--running [--fake | --mac-helper <path>]] [--pretty]
+computer-use resolve-app (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]
 computer-use capabilities --app <name> [--pretty]
-computer-use screenshot --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--out <path>] [--pretty]
-computer-use text --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
-computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
-computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]
+computer-use screenshot (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--out <path>] [--pretty]
+computer-use text (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]
+computer-use action <kind> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]
+computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]
 computer-use usecases list [--cases <path>] [--pretty]
 computer-use usecases dry-run [id] [--cases <path>] [--pretty]
-computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>) [--pretty]
+computer-use usecases run <id> [--cases <path>] [--fake | --mac-helper <path>] [--pretty]
 computer-use trace --last [--pretty]
 ```
 
@@ -47,8 +48,9 @@ computer-use trace --last [--pretty]
 
 - `doctor` — preflight CLI/helper/permissions/running-app/target-window readiness.
 - `apps` — list registered app capabilities. It is not a running-process list.
-- `apps --running --mac-helper <helper>` — list running apps from the helper.
+- `apps --running` — list running apps from the helper.
 - `resolve-app --app <target>` — resolve a user-facing app name against registry, running apps, and windows.
+- `--pid <pid>` / `--window-title <title>` — target a specific running process or window when names/bundle ids are ambiguous.
 - `capabilities --app <name>` — what the tool can do for one app.
 - `observe --app <target>` — read AX-first app state without mutating UI.
 - `observe --text --app <target>` — include a flat visible text list.
@@ -58,14 +60,15 @@ computer-use trace --last [--pretty]
 - `click --app <target> --keyword <name>` — bind a visible AX element by semantic name and click it.
 - `click --app <target> --x <n> --y <n>` — coordinate click, guarded by target-window verification in the helper.
 - `type --app <target> --text <text> [--keyword <input-name>]` — type text into the resolved/focused input.
-- `key --app <target> --key Enter` — send a key or chord.
+- `type --pid <pid> --x <n> --y <n> --text <text>` — focus an unnamed/split input at a point, then paste text.
+- `key --app <target> --key Enter` — send a key or chord; digits such as `--key 8` are supported.
 - `scroll --app <target> --direction down --amount 2` — scroll then observe again.
 - `extract --app <target> --query <question> [--fields a,b]` — extract structured data from the current observation.
 - `policy-check --app <target>` — check helper permissions and policy without UI mutation.
 - `usecases list` — every available use case (id, title, required permissions).
 - `usecases dry-run [id]` — show the steps a use case *would* run, executing nothing. Safe to inspect.
 - `usecases run <id> --fake` — run with a simulated adapter (no real UI touched). Use to validate wiring/output.
-- `usecases run <id> --mac-helper <path>` — run for real against macOS via the Swift helper. `<path>` is the built helper binary (see Install). `--fake` and `--mac-helper` are mutually exclusive.
+- `usecases run <id>` — run for real against macOS via the Swift helper. `--mac-helper <path>` is only needed to override auto-discovery. `--fake` and `--mac-helper` are mutually exclusive.
 - `trace --last` — re-read the most recent trace.
 
 ## Output shape (every command)
@@ -88,20 +91,24 @@ A `usecases run` `data` carries: `caseId`, `title`, `status` (`passed`/…), `mo
 computer-use version
 
 # 2. Check runtime readiness before any real run
-computer-use doctor --app Finder --mac-helper <helper> --pretty
+computer-use doctor --app Finder --pretty
 #   → AX-first commands need accessibility; visual modes also need screenRecording
 
 # 3. See what's available
 computer-use apps
-computer-use apps --running --mac-helper <helper> --pretty
-computer-use resolve-app --app Finder --mac-helper <helper> --pretty
+computer-use apps --running --pretty
+computer-use resolve-app --app Finder --pretty
+computer-use resolve-app --pid 12345 --pretty
 computer-use usecases list
 
 # 4. Drive one step at a time when an agent is making live decisions
-computer-use observe --app Finder --summary --text --mac-helper <helper> --pretty
-computer-use screenshot --app Finder --out /tmp/finder.png --mac-helper <helper> --pretty
-computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --mac-helper <helper> --pretty
-computer-use scroll --app Finder --direction down --amount 2 --mac-helper <helper> --pretty
+computer-use observe --app Finder --summary --text --pretty
+computer-use observe --pid 12345 --summary --text --pretty
+computer-use screenshot --app Finder --out /tmp/finder.png --pretty
+computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --pretty
+computer-use type --pid 12345 --x 750 --y 498 --text 888888 --pretty
+computer-use key --pid 12345 --key 8 --pretty
+computer-use scroll --app Finder --direction down --amount 2 --pretty
 
 # 5. Inspect a use case without touching anything
 computer-use usecases dry-run UC-020 --pretty
@@ -110,7 +117,7 @@ computer-use usecases dry-run UC-020 --pretty
 computer-use usecases run UC-030 --fake
 
 # 7. Run for real against macOS
-computer-use usecases run UC-020 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper --pretty
+computer-use usecases run UC-020 --pretty
 
 # 8. Re-read the trace
 computer-use trace --last --pretty
@@ -124,17 +131,18 @@ Prefer `--fake` or `dry-run` first when unsure — they prove the use case resol
 # In the computer-use-harness repo:
 npm install          # Node >= 22
 npm run build        # TS → dist/cli/index.js (made executable)
-npm install -g .     # optional: put `computer-use` on PATH (else call node dist/cli/index.js)
+npm install -g .     # put `computer-use` on PATH
 
 # Native macOS execution needs the Swift helper (macOS 14+, Swift 6):
 cd native/mac-helper && swift build
 # helper binary → native/mac-helper/.build/debug/computer-use-mac-helper
-# pass that path to --mac-helper
+# CLI auto-discovers this path; set COMPUTER_USE_MAC_HELPER only for custom helper builds
 ```
 
 ## Hard limits — do not invent capability
 
 - **No hidden app-specific scripts.** Atomic commands are generic. Do not add QQ Music/Feishu/Multica-only flow logic to the skill or CLI wrapper; let the agent observe, decide, act, then observe again.
+- **Disambiguate before acting.** If multiple Electron windows share the same bundle/name, use `apps --running`, then target with `--pid` or `--window-title`; do not rely on fuzzy name matching.
 - **Coordinates are last resort.** Prefer AX keyword/element binding first; use screenshot/vision or coordinates only when AX evidence is insufficient.
 - **macOS only.** Don't claim it works elsewhere.
 - **Permissions are the user's to grant.** If a real run returns `PERMISSION_REQUIRED`, report the missing permission and stop — don't retry blindly.

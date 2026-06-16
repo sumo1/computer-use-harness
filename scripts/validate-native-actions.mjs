@@ -4,11 +4,10 @@ import { spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { runNativeAction } from "../dist/actions/native-action-runner.js"
 
 const repoRoot = new URL("..", import.meta.url)
-const cliPath = fileURLToPath(new URL("../dist/cli/index.js", import.meta.url))
+const cliCommand = process.env.COMPUTER_USE_CLI ?? "computer-use"
 
 const target = {
   kind: "app",
@@ -41,6 +40,14 @@ assert.equal(runningApps.data.apps[0].name, "Fake Target App")
 const resolvedApp = runCli(["resolve-app", "--app", "Fake Target App", "--fake", "--pretty"])
 assert.equal(resolvedApp.data.runningApps[0].appId, "com.fake.TargetApp")
 assert.equal(resolvedApp.data.windows[0].focused, true)
+
+const resolvedByPid = runCli(["resolve-app", "--pid", "1001", "--fake", "--pretty"])
+assert.equal(resolvedByPid.data.target.pid, 1001)
+assert.equal(resolvedByPid.data.runningApps[0].pid, 1001)
+
+const observeByPid = runCli(["observe", "--pid", "1001", "--fake", "--pretty"])
+assert.equal(observeByPid.data.target.pid, 1001)
+assert.equal(observeByPid.data.status, "passed")
 
 const screenshotPath = join(mkdtempSync(join(tmpdir(), "computer-use-screenshot-")), "shot.png")
 const screenshot = runCli([
@@ -108,6 +115,28 @@ assertActionTraceStep(type.data.trace, "type", {
   backend: "ax-semantic",
   pointerSource: "ax-bounds",
 })
+
+const coordinateType = runCli([
+  "type",
+  "--pid",
+  "1001",
+  "--fake",
+  "--x",
+  "750",
+  "--y",
+  "498",
+  "--text",
+  "888888",
+  "--pretty",
+])
+assert.equal(coordinateType.data.status, "passed")
+assert.equal(coordinateType.data.target.pid, 1001)
+assert.equal(coordinateType.data.action.input.x, 750)
+assert.equal(coordinateType.data.action.input.y, 498)
+
+const digitKey = runCli(["key", "--pid", "1001", "--fake", "--key", "8", "--pretty"])
+assert.equal(digitKey.data.status, "passed")
+assert.equal(digitKey.data.action.input.key, "8")
 
 const scroll = runCli(["scroll", "--app", "Fake Target App", "--fake", "down", "2", "--pretty"])
 assert.equal(scroll.data.status, "passed")
@@ -210,7 +239,7 @@ function spawnCli(args) {
 }
 
 function spawnCliFromCwd(args, cwd) {
-  return spawnSync(process.execPath, [cliPath, ...args], {
+  return spawnSync(cliCommand, args, {
     cwd,
     encoding: "utf8",
     env: {

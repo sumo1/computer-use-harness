@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -13,6 +13,9 @@ import {
 import { createUseCaseAction } from "../dist/usecases/action-plan.js"
 import { observeAction, observeAfterAction } from "../dist/usecases/action-verification.js"
 import { extractionRecoveryCandidates } from "../dist/usecases/recovery-plan.js"
+
+let spawnIndex = 0
+const cliCommand = process.env.COMPUTER_USE_CLI ?? "computer-use"
 
 const target = {
   kind: "app",
@@ -178,18 +181,7 @@ assert.deepEqual(fileExtractResult.result.metadata?.result, {
 })
 
 const helperPath = writeLoopHelper("happy")
-const cliRun = spawnSync(
-  process.execPath,
-  ["dist/cli/index.js", "usecases", "run", "UC-102", "--mac-helper", helperPath, "--pretty"],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const cliRun = spawnCliWithHelper(helperPath, ["usecases", "run", "UC-102"])
 
 assert.equal(cliRun.status, 0, cliRun.stderr || cliRun.stdout)
 
@@ -200,18 +192,7 @@ assert(cliResult.data.steps.at(-1)?.description.includes("extract target goal re
 assertTargetLoopMetadata(cliResult.data.trace)
 
 const filesHelperPath = writeLoopHelper("files-largest")
-const filesCliRun = spawnSync(
-  process.execPath,
-  ["dist/cli/index.js", "usecases", "run", "UC-120", "--mac-helper", filesHelperPath, "--pretty"],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const filesCliRun = spawnCliWithHelper(filesHelperPath, ["usecases", "run", "UC-120"])
 
 assert.equal(filesCliRun.status, 0, filesCliRun.stderr || filesCliRun.stdout)
 
@@ -229,28 +210,13 @@ assert.equal(filesExtractedData.fileName, "dataset.parquet")
 assert.equal(filesExtractedData.fileSize, "2.4 GB")
 assert.equal(filesExtractedData.coverageEvidence.status, "satisfied")
 assert.equal(filesExtractedData.coverageEvidence.observedScanAttempts, 2)
+filesCliRun.stdout = ""
+filesCliResult.data.trace = []
 
-const actionObserveRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "action",
-    "observe",
-    "--app",
-    "com.fake.MediaApp",
-    "--name",
-    "Fake Media App",
-    "--mac-helper",
-    helperPath,
-    "--pretty",
-  ],
+const actionObserveRun = spawnCli(
+  ["action", "observe", "--app", "com.fake.MediaApp", "--name", "Fake Media App"],
   {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
+    macHelper: helperPath,
   },
 )
 
@@ -268,29 +234,16 @@ assert.equal(
   true,
 )
 
-const actionClickRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "click",
-    "--app",
-    "Fake Target App",
-    "--fake",
-    "--keyword",
-    "Primary",
-    "--description",
-    "click button named Primary",
-    "--pretty",
-  ],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const actionClickRun = spawnCli([
+  "click",
+  "--app",
+  "Fake Target App",
+  "--fake",
+  "--keyword",
+  "Primary",
+  "--description",
+  "click button named Primary",
+])
 
 assert.equal(actionClickRun.status, 0, actionClickRun.stderr || actionClickRun.stdout)
 
@@ -363,28 +316,11 @@ assert(
       event.action?.input?.description === "click item named 添加新歌单",
   ),
 )
+cliRun.stdout = ""
+cliResult.data.trace = []
 
 const stuckScrollHelperPath = writeLoopHelper("stuck-scroll")
-const stuckScrollCliRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "usecases",
-    "run",
-    "UC-102",
-    "--mac-helper",
-    stuckScrollHelperPath,
-    "--pretty",
-  ],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const stuckScrollCliRun = spawnCliWithHelper(stuckScrollHelperPath, ["usecases", "run", "UC-102"])
 
 assert.equal(stuckScrollCliRun.status, 0, stuckScrollCliRun.stderr || stuckScrollCliRun.stdout)
 
@@ -403,28 +339,15 @@ assert.deepEqual(
     "scroll down 5 for result coverage 3",
   ],
 )
+stuckScrollCliRun.stdout = ""
+stuckScrollCliResult.data.trace = []
 
 const loadingAfterDragHelperPath = writeLoopHelper("loading-after-drag")
-const loadingAfterDragCliRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "usecases",
-    "run",
-    "UC-102",
-    "--mac-helper",
-    loadingAfterDragHelperPath,
-    "--pretty",
-  ],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const loadingAfterDragCliRun = spawnCliWithHelper(loadingAfterDragHelperPath, [
+  "usecases",
+  "run",
+  "UC-102",
+])
 
 assert.equal(
   loadingAfterDragCliRun.status,
@@ -442,20 +365,11 @@ const loadingAfterDragResult = loadingAfterDragCliResult.data.trace.find(
 )
 assert.equal(loadingAfterDragResult?.result?.metadata?.settleRequired, true)
 assert(loadingAfterDragResult?.result?.metadata?.settleAttempts > 0)
+loadingAfterDragCliRun.stdout = ""
+loadingAfterDragCliResult.data.trace = []
 
 const stalledHelperPath = writeLoopHelper("stalled-tab")
-const stalledCliRun = spawnSync(
-  process.execPath,
-  ["dist/cli/index.js", "usecases", "run", "UC-102", "--mac-helper", stalledHelperPath, "--pretty"],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const stalledCliRun = spawnCliWithHelper(stalledHelperPath, ["usecases", "run", "UC-102"])
 
 assert.equal(stalledCliRun.status, 0, stalledCliRun.stderr || stalledCliRun.stdout)
 
@@ -479,26 +393,11 @@ assert.equal(stalledExtractedData.coverageEvidence.viewportChanged, true)
 assert.equal(stalledExtractedData.coverageEvidence.stopReason, "stable-after-change")
 
 const unstableUntilMaxHelperPath = writeLoopHelper("unstable-until-max")
-const unstableUntilMaxCliRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "usecases",
-    "run",
-    "UC-102",
-    "--mac-helper",
-    unstableUntilMaxHelperPath,
-    "--pretty",
-  ],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const unstableUntilMaxCliRun = spawnCliWithHelper(unstableUntilMaxHelperPath, [
+  "usecases",
+  "run",
+  "UC-102",
+])
 
 assert.equal(
   unstableUntilMaxCliRun.status,
@@ -532,28 +431,15 @@ assert(
       event.action?.input?.description === "scroll down 5",
   ),
 )
+stalledCliRun.stdout = ""
+stalledCliResult.data.trace = []
 
 const falseNegativeHelperPath = writeLoopHelper("type-false-negative")
-const falseNegativeCliRun = spawnSync(
-  process.execPath,
-  [
-    "dist/cli/index.js",
-    "usecases",
-    "run",
-    "UC-102",
-    "--mac-helper",
-    falseNegativeHelperPath,
-    "--pretty",
-  ],
-  {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: "",
-    },
-  },
-)
+const falseNegativeCliRun = spawnCliWithHelper(falseNegativeHelperPath, [
+  "usecases",
+  "run",
+  "UC-102",
+])
 
 assert.equal(
   falseNegativeCliRun.status,
@@ -653,6 +539,66 @@ function assertTargetLoopMetadata(trace) {
         event.actionTraceStep?.execution.inputBackend?.backend || event.action?.kind === "observe",
     ),
   )
+}
+
+function spawnCliWithHelper(helperPath, args) {
+  return spawnCli(args, { macHelper: helperPath })
+}
+
+function spawnCli(args, options = {}) {
+  let result
+  for (let attempt = 0; attempt < 5; attempt++) {
+    sleepMs(150 + attempt * 250)
+    result = spawnCliOnce(args, options)
+    if (!shouldRetryCliRun(result)) {
+      return result
+    }
+  }
+
+  sleepMs(3000)
+  return spawnCliOnce(args, options)
+}
+
+function shouldRetryCliRun(result) {
+  const output = `${result.stdout}\n${result.stderr}`
+  return output.includes("mac-helper exited with signal SIGKILL") || output.includes("write EPIPE")
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function spawnCliOnce(args, options) {
+  const dir = join(tmpdir(), "computer-use-harness")
+  mkdirSync(dir, { recursive: true })
+
+  const stdoutPath = join(dir, `validate-loop-${process.pid}-${spawnIndex++}.stdout.json`)
+  const stderrPath = join(dir, `validate-loop-${process.pid}-${spawnIndex++}.stderr.log`)
+  const command = `${[cliCommand, ...args].map(shellQuote).join(" ")} > ${shellQuote(
+    stdoutPath,
+  )} 2> ${shellQuote(stderrPath)}`
+  const result = spawnSync("/bin/sh", ["-c", command], {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "",
+      ...(options.macHelper ? { COMPUTER_USE_MAC_HELPER: options.macHelper } : {}),
+    },
+  })
+
+  const output = {
+    ...result,
+    stdout: readFileSync(stdoutPath, "utf8"),
+    stderr: readFileSync(stderrPath, "utf8"),
+  }
+
+  sleepMs(750)
+  return output
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
 function writeLoopHelper(scenario) {

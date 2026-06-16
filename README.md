@@ -64,7 +64,7 @@ Claude Code / Codex / shell / future MCP
 - TS / Swift helper protocol。
 - Swift native helper 实现。
 - native helper stdio JSON-RPC 长连接。
-- native runner，通过 `--mac-helper <path>` 把真实 action 执行结果写入 trace。
+- native runner，默认自动发现 Swift helper，也可通过 `--mac-helper <path>` 覆盖，把真实 action 执行结果写入 trace。
 
 当前 Swift helper 支持：
 
@@ -170,29 +170,30 @@ computer-use-harness 只负责把 browser capability 接进统一 Target / Obser
 npm install
 ```
 
-### 2. 构建 CLI
+### 2. 构建并安装 CLI
 
 ```sh
 npm run build
+npm install -g .
 ```
 
 ### 3. 跑 fake use case
 
 ```sh
-./dist/cli/index.js usecases list
-./dist/cli/index.js usecases run UC-030 --fake
-./dist/cli/index.js trace --last
+computer-use usecases list
+computer-use usecases run UC-030 --fake
+computer-use trace --last
 ```
 
 ### 4. 跑自由原子 action
 
 ```sh
-./dist/cli/index.js observe --app "Fake Target App" --fake --pretty
-./dist/cli/index.js click --app "Fake Target App" --fake \
+computer-use observe --app "Fake Target App" --fake --pretty
+computer-use click --app "Fake Target App" --fake \
   --keyword Primary \
   --description "click button named Primary" \
   --pretty
-./dist/cli/index.js scroll --app "Fake Target App" --fake down 2 --pretty
+computer-use scroll --app "Fake Target App" --fake --direction down --amount 2 --pretty
 ```
 
 每个 action 都会执行 policy、必要的 observe-before、action、observe-after，并写入 trace。
@@ -215,15 +216,13 @@ swift build
 
 ```sh
 # QQ Music: 搜索"鸭子"并播放
-./dist/cli/index.js usecases run UC-100 \
-  --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use usecases run UC-100
 
 # Sublime Text: 编辑并保存文件
-./dist/cli/index.js usecases run UC-110 \
-  --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use usecases run UC-110
 
 # 查看 trace
-./dist/cli/index.js trace --last
+computer-use trace --last
 ```
 
 预期结果：
@@ -240,22 +239,28 @@ swift build
 ```sh
 computer-use version
 computer-use apps
-computer-use apps --running --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use doctor --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use resolve-app --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use apps --running
+computer-use doctor --app Finder
+computer-use doctor --pid 12345
+computer-use resolve-app --app Finder
+computer-use resolve-app --pid 12345
+computer-use resolve-app --window-title "Downloads"
 computer-use capabilities --app Safari
-computer-use observe --app Finder --summary --text --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use text --app Finder --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use screenshot --app Finder --out /tmp/finder.png --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use click --app Finder --keyword Downloads --description "click item named Downloads" --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use observe --app Finder --summary --text
+computer-use observe --pid 12345 --summary --text
+computer-use text --app Finder
+computer-use screenshot --app Finder --out /tmp/finder.png
+computer-use click --app Finder --keyword Downloads --description "click item named Downloads"
 computer-use type --app "Fake Target App" --fake --keyword "Main Input" --text hello
-computer-use key --app Finder --key Enter --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use scroll --app Finder --direction down --amount 2 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
-computer-use extract --app Finder --query "visible files" --fields files --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use type --pid 12345 --x 750 --y 498 --text 888888
+computer-use key --app Finder --key Enter
+computer-use key --pid 12345 --key 8
+computer-use scroll --app Finder --direction down --amount 2
+computer-use extract --app Finder --query "visible files" --fields files
 computer-use usecases list --cases ./usecases/cases.yaml
 computer-use usecases dry-run UC-030
 computer-use usecases run UC-030 --fake
-computer-use usecases run UC-030 --mac-helper ./native/mac-helper/.build/debug/computer-use-mac-helper
+computer-use usecases run UC-030
 computer-use trace --last
 ```
 
@@ -273,5 +278,8 @@ CLI 约束：
 - error code 必须稳定。
 - action failure 必须进入 trace。
 - agent shell 脚本必须同时检查 `ok` 和 `data.status`；需要让 shell 在动作失败时非 0，可加 `--fail-on-action-failed`。
-- `apps` 默认是 capability registry，不是运行中进程列表；运行中 app 用 `apps --running --mac-helper <helper>`。
+- `apps` 默认是 capability registry，不是运行中进程列表；运行中 app 用 `apps --running`。
+- real macOS 命令默认按顺序找 helper：`--mac-helper`、`COMPUTER_USE_MAC_HELPER`、`COMPUTER_USE_HARNESS_DIR`、当前 repo 默认 build path。
+- 多个同名 Electron/候选客户端同时运行时，优先用 `--pid` 或 `--window-title` 精确定位；`--app` 适合唯一 app 名或 bundle id。
+- 无名/分格输入框可先 `click --x --y` 聚焦，再用 `type --x --y --text ...` 或 `key --key 8` 这类原子动作输入。
 - 跨仓库调用 use case 时传 `--cases <path>`，避免依赖当前工作目录。

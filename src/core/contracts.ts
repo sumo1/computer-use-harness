@@ -31,6 +31,8 @@ export interface Target {
   kind: TargetKind
   id?: string
   name?: string
+  pid?: number
+  windowTitle?: string
   platform?: "any" | "macos"
 }
 
@@ -81,6 +83,7 @@ export interface WindowMetadata {
   focused: boolean
   bounds?: CoordinateBounds
   appId?: string
+  pid?: number
 }
 
 export interface PermissionsSnapshot {

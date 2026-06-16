@@ -27,6 +27,7 @@ export interface MacHelperProcessOptions {
 }
 
 interface PendingRequest {
+  method: MacHelperMethod
   resolve(value: object): void
   reject(error: Error): void
 }
@@ -47,6 +48,7 @@ export class MacHelperProcessClient implements MacHelperClient {
   private readonly process: ChildProcessWithoutNullStreams
   private readonly lines: Interface
   private readonly pending = new Map<string, PendingRequest>()
+  private stderr = ""
 
   constructor(options: MacHelperProcessOptions) {
     this.process = spawn(options.command, options.args ?? [], {
@@ -56,9 +58,13 @@ export class MacHelperProcessClient implements MacHelperClient {
     this.lines = createInterface({ input: this.process.stdout })
 
     this.lines.on("line", (line) => this.handleLine(line))
+    this.process.stdin.on("error", (error) => this.rejectAll(error))
+    this.process.stderr.on("data", (chunk: Buffer) => {
+      this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-8000)
+    })
     this.process.once("error", (error) => this.rejectAll(error))
-    this.process.once("close", (code) => {
-      this.rejectAll(new Error(`mac-helper exited with code ${code ?? "unknown"}.`))
+    this.process.once("close", (code, signal) => {
+      this.rejectAll(new Error(this.exitMessage(code, signal)))
     })
   }
 
@@ -138,6 +144,7 @@ export class MacHelperProcessClient implements MacHelperClient {
 
     return new Promise<TResult>((resolve, reject) => {
       this.pending.set(id, {
+        method,
         resolve: (value) => resolve(value as TResult),
         reject,
       })
@@ -190,6 +197,16 @@ export class MacHelperProcessClient implements MacHelperClient {
     }
 
     this.pending.clear()
+  }
+
+  private exitMessage(code: number | null, signal: NodeJS.Signals | null): string {
+    const suffix = this.stderr.trim() ? ` stderr: ${this.stderr.trim()}` : ""
+    const pending = [...this.pending.values()].map((request) => request.method).join(",")
+    const pendingSuffix = pending ? ` pending: ${pending}.` : ""
+    const status =
+      signal !== null ? `signal ${signal}` : code !== null ? `code ${code}` : "code unknown"
+
+    return `mac-helper exited with ${status}.${pendingSuffix}${suffix}`
   }
 }
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto"
+import { constants, accessSync, existsSync, realpathSync } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { delimiter, dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { runNativeAction } from "../actions/native-action-runner.js"
 import { createFakeMacHelperClient } from "../adapters/mac/fake-helper-client.js"
 import type { MacHelperClient, MacRunningApp } from "../adapters/mac/helper-protocol.js"
@@ -30,6 +32,11 @@ interface ParsedArgs {
   flags: Map<string, string | true>
 }
 
+const CLI_NAME = "computer-use"
+const MAC_HELPER_ENV = "COMPUTER_USE_MAC_HELPER"
+const HARNESS_DIR_ENV = "COMPUTER_USE_HARNESS_DIR"
+const MAC_HELPER_RELATIVE_PATH = "native/mac-helper/.build/debug/computer-use-mac-helper"
+
 const VALUE_FLAGS = new Set([
   "amount",
   "app",
@@ -44,6 +51,7 @@ const VALUE_FLAGS = new Set([
   "name",
   "observation-mode",
   "out",
+  "pid",
   "platform",
   "poll-interval-ms",
   "query",
@@ -63,6 +71,7 @@ const VALUE_FLAGS = new Set([
   "y",
   "delta-x",
   "delta-y",
+  "window-title",
   "disable-visual-fallback",
   "settle-after-action",
   "wait-for-state-change",
@@ -166,7 +175,7 @@ async function handleActionCommand(args: ParsedArgs, pretty: boolean): Promise<n
         providedKind ? `Unknown action kind '${providedKind}'.` : "Action kind is required.",
         {
           usage:
-            "computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
+            "computer-use action <kind> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]",
           supportedKinds: [...ACTION_KIND_ALIASES.keys()],
         },
       ),
@@ -187,15 +196,12 @@ async function handleActionCommand(args: ParsedArgs, pretty: boolean): Promise<n
     )
     return ExitCode.USAGE_OR_BUSINESS_ERROR
   }
-  if (!normalizedArgs.flags.has("fake") && !helperCommand) {
-    writeResult(
-      fail(
-        "action.run",
-        CommandErrorCode.REAL_RUNNER_NOT_IMPLEMENTED,
-        "Use --fake or --mac-helper <path>.",
-      ),
-      pretty,
-    )
+
+  const helperResolution = normalizedArgs.flags.has("fake")
+    ? undefined
+    : resolveCliHelperCommand(normalizedArgs)
+  if (helperResolution && !helperResolution.ok) {
+    writeResult(helperResolution.error, pretty)
     return ExitCode.USAGE_OR_BUSINESS_ERROR
   }
 
@@ -205,10 +211,10 @@ async function handleActionCommand(args: ParsedArgs, pretty: boolean): Promise<n
       fail(
         "action.run",
         CommandErrorCode.MISSING_APP_NAME,
-        "App target requires --app, --id, or --name.",
+        "App target requires --app, --id, --name, --pid, or --window-title.",
         {
           usage:
-            "computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>)",
+            "computer-use action <kind> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>]",
         },
       ),
       pretty,
@@ -235,7 +241,7 @@ async function handleActionCommand(args: ParsedArgs, pretty: boolean): Promise<n
   const runResult = await runNativeAction({
     target,
     action,
-    helperCommand,
+    helperCommand: helperResolution?.command,
     fake: normalizedArgs.flags.has("fake"),
   })
   const traceWrite = await writeTrace(runResult.traceId, runResult.trace)
@@ -279,10 +285,13 @@ async function handleApps(args: ParsedArgs, pretty: boolean): Promise<number> {
 
 async function handleResolveApp(args: ParsedArgs, pretty: boolean): Promise<number> {
   const appName = readFlagValue(args, "app")
-  if (!appName) {
+  const pid = readNumberFlag(args, "pid")
+  const windowTitle = readFlagValue(args, "window-title")
+  if (!appName && pid === undefined && !windowTitle) {
     writeResult(
       fail("resolve-app", CommandErrorCode.MISSING_APP_NAME, "App name is required.", {
-        usage: "computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>)",
+        usage:
+          "computer-use resolve-app (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>]",
       }),
       pretty,
     )
@@ -296,16 +305,20 @@ async function handleResolveApp(args: ParsedArgs, pretty: boolean): Promise<numb
   }
 
   try {
-    const capability = findAppCapability(appName)
+    const capability = appName ? findAppCapability(appName) : undefined
     const target = createCliTarget(args)
-    const runningApps = (await helperResult.helper.listApps()).filter((app) =>
-      matchesRunningApp(app, appName),
-    )
+    const runningApps = (await helperResult.helper.listApps()).filter((app) => {
+      if (pid !== undefined) {
+        return app.pid === pid
+      }
+
+      return appName ? matchesRunningApp(app, appName) : true
+    })
     const windows = target ? await helperResult.helper.listWindows(target) : []
 
     writeResult(
       ok("app.resolve", {
-        query: appName,
+        ...(appName ? { query: appName } : {}),
         target,
         capability,
         runningApps,
@@ -324,7 +337,11 @@ async function handleScreenshot(args: ParsedArgs, pretty: boolean): Promise<numb
   const target = createCliTarget(args)
   if (!target) {
     writeResult(
-      fail("screenshot", CommandErrorCode.MISSING_APP_NAME, "App target requires --app."),
+      fail(
+        "screenshot",
+        CommandErrorCode.MISSING_APP_NAME,
+        "App target requires --app, --id, --name, --pid, or --window-title.",
+      ),
       pretty,
     )
     return ExitCode.USAGE_OR_BUSINESS_ERROR
@@ -387,6 +404,8 @@ async function handleText(args: ParsedArgs, pretty: boolean): Promise<number> {
 }
 
 async function handleDoctor(args: ParsedArgs, pretty: boolean): Promise<number> {
+  const installedCliPath = cliPathOnPath()
+  const currentPath = currentCliPath()
   const checks: JsonObject[] = [
     {
       name: "node",
@@ -395,34 +414,55 @@ async function handleDoctor(args: ParsedArgs, pretty: boolean): Promise<number> 
     },
     {
       name: "cli",
-      status: "passed",
-      detail: "dist CLI is executable in the current process",
+      status: installedCliPath ? "passed" : "warning",
+      detail: installedCliPath
+        ? {
+            path: installedCliPath,
+            ...(currentPath ? { current: currentPath } : {}),
+          }
+        : {
+            ...(currentPath ? { current: currentPath } : {}),
+            message:
+              "`computer-use` is not on PATH; installed users should not need node dist/cli/index.js.",
+            remedy:
+              "Run `npm run build && npm install -g .` from this repo, or add the package bin to PATH.",
+          },
     },
   ]
-
-  const helperCommand = readFlagValue(args, "mac-helper")
-  if (!args.flags.has("fake") && !helperCommand) {
-    checks.push({
-      name: "helper",
-      status: "warning",
-      detail: "No --mac-helper provided; real macOS checks were skipped.",
-    })
-    writeResult(ok("doctor", { status: "warning", checks }), pretty)
-    return ExitCode.OK
-  }
 
   const helperResult = createCliHelper(args)
   if (!helperResult.ok) {
     checks.push({
-      name: "helper",
-      status: "failed",
-      detail: helperResult.error.error?.message ?? "Helper setup failed.",
+      name: "mac-helper",
+      status: "warning",
+      detail: {
+        message: helperResult.error.error?.message ?? "Helper setup failed.",
+        candidates: helperDiscoveryCandidates(args).map(helperCandidateToJson),
+      },
     })
-    writeResult(ok("doctor", { status: "failed", checks }), pretty)
+    const warning = checks.some((check) => check.status === "warning")
+    writeResult(ok("doctor", { status: warning ? "warning" : "passed", checks }), pretty)
     return ExitCode.OK
   }
 
   try {
+    if (helperResult.source === "mac-helper") {
+      checks.push({
+        name: "mac-helper",
+        status: "passed",
+        detail: {
+          path: helperResult.helperCommand ?? "",
+          source: helperResult.helperSource ?? "unknown",
+        },
+      })
+    } else {
+      checks.push({
+        name: "mac-helper",
+        status: "passed",
+        detail: "Using fake helper.",
+      })
+    }
+
     const permissions = await helperResult.helper.permissionStatus()
     checks.push({
       name: "permissions",
@@ -545,7 +585,11 @@ async function observeForCli(
   if (!target) {
     return {
       ok: false,
-      error: fail(command, CommandErrorCode.MISSING_APP_NAME, "App target requires --app."),
+      error: fail(
+        command,
+        CommandErrorCode.MISSING_APP_NAME,
+        "App target requires --app, --id, --name, --pid, or --window-title.",
+      ),
     }
   }
 
@@ -576,11 +620,12 @@ function createCliHelper(args: ParsedArgs):
       ok: true
       helper: MacHelperClient
       source: "fake" | "mac-helper"
+      helperCommand?: string
+      helperSource?: string
       close?: () => void
     }
   | { ok: false; error: CommandResult } {
-  const helperCommand = readFlagValue(args, "mac-helper")
-  if (args.flags.has("fake") && helperCommand) {
+  if (args.flags.has("fake") && readFlagValue(args, "mac-helper")) {
     return {
       ok: false,
       error: fail(
@@ -599,23 +644,176 @@ function createCliHelper(args: ParsedArgs):
     }
   }
 
-  if (!helperCommand) {
+  const helperResolution = resolveCliHelperCommand(args)
+  if (!helperResolution.ok) {
     return {
       ok: false,
-      error: fail(
-        "helper.create",
-        CommandErrorCode.REAL_RUNNER_NOT_IMPLEMENTED,
-        "Use --fake or --mac-helper <path>.",
-      ),
+      error: helperResolution.error,
     }
   }
 
-  const helper = new MacHelperProcessClient({ command: helperCommand })
+  const helper = new MacHelperProcessClient({ command: helperResolution.command })
   return {
     ok: true,
     helper,
     source: "mac-helper",
+    helperCommand: helperResolution.command,
+    helperSource: helperResolution.source,
     close: () => helper.close(),
+  }
+}
+
+interface HelperCandidate {
+  path: string
+  source: string
+}
+
+function resolveCliHelperCommand(
+  args: ParsedArgs,
+): { ok: true; command: string; source: string } | { ok: false; error: CommandResult } {
+  const candidates = helperDiscoveryCandidates(args)
+  const found = candidates.find((candidate) => isExecutableFile(candidate.path))
+  if (found) {
+    return {
+      ok: true,
+      command: found.path,
+      source: found.source,
+    }
+  }
+
+  return {
+    ok: false,
+    error: fail(
+      "helper.create",
+      CommandErrorCode.REAL_RUNNER_NOT_IMPLEMENTED,
+      "No mac helper found. Pass --mac-helper <path>, set COMPUTER_USE_MAC_HELPER, or build the default helper with `cd native/mac-helper && swift build`.",
+      {
+        env: MAC_HELPER_ENV,
+        harnessDirEnv: HARNESS_DIR_ENV,
+        defaultRelativePath: MAC_HELPER_RELATIVE_PATH,
+        candidates: candidates.map(helperCandidateToJson),
+      },
+    ),
+  }
+}
+
+function helperDiscoveryCandidates(args: ParsedArgs): HelperCandidate[] {
+  const candidates: HelperCandidate[] = []
+  const explicit = readFlagValue(args, "mac-helper")
+  if (explicit) {
+    candidates.push({ path: resolve(explicit), source: "--mac-helper" })
+  }
+
+  const envHelper = process.env[MAC_HELPER_ENV]
+  if (envHelper?.trim()) {
+    candidates.push({ path: resolve(envHelper), source: MAC_HELPER_ENV })
+  }
+
+  const envHarnessDir = process.env[HARNESS_DIR_ENV]
+  if (envHarnessDir?.trim()) {
+    candidates.push({
+      path: join(resolve(envHarnessDir), MAC_HELPER_RELATIVE_PATH),
+      source: HARNESS_DIR_ENV,
+    })
+  }
+
+  const repoRoot = findRepoRoot()
+  if (repoRoot) {
+    candidates.push({
+      path: join(repoRoot, MAC_HELPER_RELATIVE_PATH),
+      source: "detected-repo",
+    })
+  }
+
+  candidates.push({
+    path: join(process.cwd(), MAC_HELPER_RELATIVE_PATH),
+    source: "cwd",
+  })
+
+  return uniqueHelperCandidates(candidates)
+}
+
+function uniqueHelperCandidates(candidates: HelperCandidate[]): HelperCandidate[] {
+  const seen = new Set<string>()
+  const unique: HelperCandidate[] = []
+
+  for (const candidate of candidates) {
+    const key = candidate.path
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    unique.push(candidate)
+  }
+
+  return unique
+}
+
+function helperCandidateToJson(candidate: HelperCandidate): JsonObject {
+  return {
+    path: candidate.path,
+    source: candidate.source,
+    exists: existsSync(candidate.path),
+    executable: isExecutableFile(candidate.path),
+  }
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function findRepoRoot(): string | undefined {
+  let current = dirname(fileURLToPath(import.meta.url))
+
+  for (let depth = 0; depth < 8; depth++) {
+    if (
+      existsSync(join(current, "package.json")) &&
+      existsSync(join(current, "native", "mac-helper"))
+    ) {
+      return current
+    }
+
+    const parent = dirname(current)
+    if (parent === current) {
+      return undefined
+    }
+    current = parent
+  }
+
+  return undefined
+}
+
+function cliPathOnPath(): string | undefined {
+  const pathValue = process.env.PATH ?? ""
+  for (const entry of pathValue.split(delimiter)) {
+    if (!entry) {
+      continue
+    }
+
+    const candidate = join(entry, CLI_NAME)
+    if (isExecutableFile(candidate)) {
+      return realpathOrPath(candidate)
+    }
+  }
+
+  return undefined
+}
+
+function currentCliPath(): string | undefined {
+  return process.argv[1] ? realpathOrPath(resolve(process.argv[1])) : undefined
+}
+
+function realpathOrPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
   }
 }
 
@@ -660,6 +858,7 @@ function observationSummary(observation: Observation): JsonObject {
       title: window.title,
       focused: window.focused,
       ...(window.appId ? { appId: window.appId } : {}),
+      ...(window.pid !== undefined ? { pid: window.pid } : {}),
     })),
     inputs: elements.filter(isInputElement).slice(0, 20).map(elementSummary),
     controls: elements.filter(isControlElement).slice(0, 40).map(elementSummary),
@@ -692,6 +891,8 @@ function targetToJson(target: Target): JsonObject {
     kind: target.kind,
     ...(target.id ? { id: target.id } : {}),
     ...(target.name ? { name: target.name } : {}),
+    ...(target.pid !== undefined ? { pid: target.pid } : {}),
+    ...(target.windowTitle ? { windowTitle: target.windowTitle } : {}),
     ...(target.platform ? { platform: target.platform } : {}),
   }
 }
@@ -702,6 +903,7 @@ function windowToJson(window: NonNullable<Observation["focusedWindow"]>): JsonOb
     title: window.title,
     focused: window.focused,
     ...(window.appId ? { appId: window.appId } : {}),
+    ...(window.pid !== undefined ? { pid: window.pid } : {}),
     ...(window.bounds ? { bounds: window.bounds as unknown as JsonObject } : {}),
   }
 }
@@ -809,6 +1011,7 @@ function readObservationMode(args: ParsedArgs): "full" | "ax-only" | "visual-tex
 function matchesRunningApp(app: MacRunningApp, query: string): boolean {
   const normalizedQuery = normalizeText(query)
   return (
+    String(app.pid ?? "").includes(normalizedQuery) ||
     normalizeText(app.appId).includes(normalizedQuery) ||
     normalizeText(app.name).includes(normalizedQuery)
   )
@@ -841,6 +1044,8 @@ function normalizeActionKind(command: string | undefined): ActionKind | undefine
 function createCliTarget(args: ParsedArgs): Target | undefined {
   const app = readFlagValue(args, "app")
   const capability = app ? findAppCapability(app) : undefined
+  const pid = readNumberFlag(args, "pid")
+  const windowTitle = readFlagValue(args, "window-title")
   const id =
     readFlagValue(args, "id") ?? readFlagValue(args, "target-id") ?? capability?.appId ?? app
   const name =
@@ -849,7 +1054,7 @@ function createCliTarget(args: ParsedArgs): Target | undefined {
     capability?.displayName ??
     app
 
-  if (!id && !name) {
+  if (!id && !name && pid === undefined && !windowTitle) {
     return undefined
   }
 
@@ -857,6 +1062,8 @@ function createCliTarget(args: ParsedArgs): Target | undefined {
     kind: "app",
     ...(id ? { id } : {}),
     ...(name ? { name } : {}),
+    ...(pid !== undefined ? { pid } : {}),
+    ...(windowTitle ? { windowTitle } : {}),
     platform: readPlatform(args),
   }
 }
@@ -1063,7 +1270,6 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
 
   if (subcommand === "run") {
     const id = args.command[2]
-    const helperCommand = readFlagValue(args, "mac-helper")
     if (!id) {
       writeResult(
         fail("usecases.run", CommandErrorCode.MISSING_CASE_ID, "Use case id is required."),
@@ -1071,7 +1277,7 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       )
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
-    if (args.flags.has("fake") && helperCommand) {
+    if (args.flags.has("fake") && readFlagValue(args, "mac-helper")) {
       writeResult(
         fail(
           "usecases.run",
@@ -1082,15 +1288,10 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       )
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
-    if (!args.flags.has("fake") && !helperCommand) {
-      writeResult(
-        fail(
-          "usecases.run",
-          CommandErrorCode.REAL_RUNNER_NOT_IMPLEMENTED,
-          "Use --fake or --mac-helper <path>.",
-        ),
-        pretty,
-      )
+
+    const helperResolution = args.flags.has("fake") ? undefined : resolveCliHelperCommand(args)
+    if (helperResolution && !helperResolution.ok) {
+      writeResult(helperResolution.error, pretty)
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
 
@@ -1104,8 +1305,8 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       return ExitCode.USAGE_OR_BUSINESS_ERROR
     }
 
-    const runResult = helperCommand
-      ? await runNativeUseCase(useCase, { helperCommand })
+    const runResult = helperResolution
+      ? await runNativeUseCase(useCase, { helperCommand: helperResolution.command })
       : await runFakeUseCase(useCase)
     const traceWrite = await writeTrace(runResult.traceId, runResult.trace)
 
@@ -1123,7 +1324,7 @@ async function handleUseCases(args: ParsedArgs, pretty: boolean): Promise<number
       `Unknown usecases command '${subcommand ?? ""}'.`,
       {
         usage:
-          "computer-use usecases list [--cases <path>] | computer-use usecases dry-run [id] [--cases <path>] | computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>)",
+          "computer-use usecases list [--cases <path>] | computer-use usecases dry-run [id] [--cases <path>] | computer-use usecases run <id> [--cases <path>] [--fake | --mac-helper <path>]",
       },
     ),
     pretty,
@@ -1315,17 +1516,17 @@ function queryFromDescription(description: string | undefined): string | undefin
 function usageText(): string {
   return [
     "computer-use version",
-    "computer-use doctor [--app <name-or-bundle-id>] (--fake | --mac-helper <path>) [--pretty]",
-    "computer-use apps [--running (--fake | --mac-helper <path>)] [--pretty]",
-    "computer-use resolve-app --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
+    "computer-use doctor [--app <name-or-bundle-id> | --pid <pid> | --window-title <title>] [--fake | --mac-helper <path>] [--pretty]",
+    "computer-use apps [--running [--fake | --mac-helper <path>]] [--pretty]",
+    "computer-use resolve-app (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]",
     "computer-use capabilities --app <name> [--pretty]",
-    "computer-use screenshot --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--out <path>] [--pretty]",
-    "computer-use text --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
-    "computer-use action <kind> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
-    "computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> --app <name-or-bundle-id> (--fake | --mac-helper <path>) [--pretty]",
+    "computer-use screenshot (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--out <path>] [--pretty]",
+    "computer-use text (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]",
+    "computer-use action <kind> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]",
+    "computer-use <observe|open|click|type|key|scroll|drag|hover|extract|policy-check> (--app <name-or-bundle-id> | --pid <pid> | --window-title <title>) [--fake | --mac-helper <path>] [--pretty]",
     "computer-use usecases list [--cases <path>] [--pretty]",
     "computer-use usecases dry-run [id] [--cases <path>] [--pretty]",
-    "computer-use usecases run <id> [--cases <path>] (--fake | --mac-helper <path>) [--pretty]",
+    "computer-use usecases run <id> [--cases <path>] [--fake | --mac-helper <path>] [--pretty]",
     "computer-use trace --last [--pretty]",
   ].join("\n")
 }

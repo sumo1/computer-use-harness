@@ -68,6 +68,7 @@ export interface MacWindow {
   appId: string
   title: string
   focused: boolean
+  pid?: number
 }
 
 export interface MacAppState {
